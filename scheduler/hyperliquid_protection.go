@@ -332,6 +332,11 @@ func runHyperliquidProtectionSync(
 		return false
 	}
 	applyHyperliquidProtectionSync(pos, protection)
+	// Re-stamp TradeHistory so the trade alert picks up SL/TP prices placed
+	// by the protection sync (#625). Without this, execute-path SL=0 leaves the
+	// trade's StopLossTriggerPx unset even though the sync correctly populated
+	// pos.StopLossTriggerPx — the alert then shows no SL price.
+	stampOpenTradeFromPosition(stratState, nil, symbol, pos)
 	if logger != nil {
 		logger.Info("%s (sl_oid=%d tp_oids=%v)", logTag, pos.StopLossOID, pos.TPOIDs)
 	}
