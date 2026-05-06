@@ -228,13 +228,16 @@ When in doubt, treat as runtime default and prompt. Regenerate from `git log --o
 - **`#T` counts positions opened, not round-trips (#608)** — `LifetimeTradeStats.PositionsOpened` (sourced from `is_close=0`) replaces `RoundTrips`; opens contribute immediately. W/L still round-trip aggregated
 - **HL on-chain reduce-only TP suppresses in-process tiered close evaluators (#604)** — for HL perps strategies that place per-strategy on-chain reduce-only TPs, `tiered_tp_atr` / `tiered_tp_atr_live` are auto-stripped from `close_strategies` to prevent races with the on-chain limit fill. SL re-arming queries `userFills` to detect filled-externally
 - **Tiered-TP final-tier dust fix (#592/#593)** — sole-peer final-tier closes use `market_close(sz=None)` to flatten on-chain residual; shared-coin peers still use sized close to avoid zeroing peer exposure
+- **`type=manual` coin-sharing with HL perps (#619/#620)** — blanket validation ban (#599) replaced with owner guards; `shouldCloseFullPosition` prevents flattening peer exposure on full-close; all TP OIDs cancelled via `extraCancelOIDs`; peers must share `leverage` and `margin_mode`
+- **HL SL size capped at on-chain qty (#621/#622)** — `hlSLEffectiveQty` caps stop-loss placement at `min(virtualQty, onChainQty)` to prevent rejected oversized orders after a manual TP; reconciler SL-close uses actual `FilledQty` from `userFills` for PnL/cash (was: stale virtual qty)
+- **ATR SL trade-stamp backfill on arm (#624)** — `stampOpenTradeFromPosition` now called the moment `StopLossTriggerPx` arms (paper + live), so `trades.stop_loss_trigger_px` is filled in even when the SL is placed after the open record was written
 
 **Opt-in field**
 - `trailing_stop_pct` (#502); `trailing_stop_atr_mult` (#507 — initial trigger deferred one cycle)
 - Open/close composition (#483); `stop_loss_margin_pct` (#490); `margin_per_trade_usd` (#520)
 - `tiered_tp_atr_live` (#527 — `atr_source` param, falls back to entry ATR on warm-up)
 - Regime detection `regime.enabled` + `allowed_regimes` (#541/#546/#558 — `Trade.Regime` column added on first start)
-- **`type: "manual"` strategy + `manual-open` / `manual-close` CLI (#569)** — operator-driven HL perps with auto-defaults SL@1×ATR + `tiered_tp_atr_live` (TP1@2× / TP2@3×); cannot share a coin with a live HL perps strategy or another live `type=manual` (#599 — manual full-close paths flatten the entire wallet position via `market_close(sz=None)`)
+- **`type: "manual"` strategy + `manual-open` / `manual-close` CLI (#569)** — operator-driven HL perps with auto-defaults SL@1×ATR + `tiered_tp_atr_live` (TP1@2× / TP2@3×); can now share a coin with HL perps or another `type=manual` (#619/#620 — blanket ban lifted; owner guards + `shouldCloseFullPosition` + `extraCancelOIDs` prevent cross-strategy mutation; peers must agree on `leverage` and `margin_mode`)
 - **`discord.trade_alert_channels` / `telegram.trade_alert_channels` (#572/#573)** — optional map to route trade-fill alerts to a separate channel; omit to keep current behavior (summaries + alerts on same `channels` entry)
 - **N-tier HL TP via `params.tiers` (#615/issue #612)** — list of `{atr_multiple, close_fraction}` (cumulative); default `[{1×,0.5},{2×,1.0}]`; final tier coerced to 1.0 so on-chain TPs sum to full position; non-numeric values rejected per tier. `Position.TPOIDs` / `positions.tp_oids_json` SQLite column (legacy `tp1_oid` / `tp2_oid` retained for rollback to pre-#615 — only first two tiers survive a downgrade)
 
@@ -390,7 +393,7 @@ Config skeleton (no `script` / `args` / `interval_seconds` — `LoadConfig` fill
 {"id":"hl-manual-btc","type":"manual","platform":"hyperliquid","symbol":"BTC","capital":1000,"leverage":3,"max_drawdown_pct":10}
 ```
 
-Validation refuses a `type=manual` sharing a symbol with a live HL perps strategy or another live `type=manual` (#599 — manual full-close flattens the entire wallet position).
+Multiple `type=manual` strategies and HL perps strategies may share a coin (#619/#620). Owner guards prevent cross-strategy mutation; full-close uses `shouldCloseFullPosition` to avoid flattening a peer's position; all TP OIDs are cancelled on full close. Peers must share `leverage` and `margin_mode`; at most one trailing-stop owner per coin.
 
 CLI:
 
@@ -578,7 +581,7 @@ Platform conventions:
 | --- | --- | --- |
 | BinanceUS spot | none | `spot`, `shared_scripts/check_strategy.py` |
 | Hyperliquid perps | `hl-` | `perps`, `shared_scripts/check_hyperliquid.py` |
-| Hyperliquid manual | `hl-` | `manual` (#569), no script/interval; `manual-open`/`manual-close`; auto-defaults SL@1×ATR + `tiered_tp_atr_live` (TP1@2× / TP2@3×) |
+| Hyperliquid manual | `hl-` | `manual` (#569), no script/interval; `manual-open`/`manual-close`; auto-defaults SL@1×ATR + `tiered_tp_atr_live` (TP1@2× / TP2@3×); can share coin with HL perps peers (#619/#620) |
 | TopStep futures | `ts-` | `futures`, `shared_scripts/check_topstep.py` |
 | Robinhood | `rh-` | spot via `check_robinhood.py`, options via `check_options.py --platform=robinhood` |
 | OKX | `okx-` | `check_okx.py` (spot/perps), `check_options.py --platform=okx` for options |
