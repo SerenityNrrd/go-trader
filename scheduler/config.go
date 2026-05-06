@@ -558,13 +558,12 @@ func LoadConfig(path string) (*Config, error) {
 			fmt.Printf("[INFO] %s: no theta_harvest config, applying defaults (profit=60%%, stop=200%%, dte=3)\n", cfg.Strategies[i].ID)
 		}
 	}
-	normalizeHyperliquidPeerStopLosses(cfg.Strategies)
 
-	// #562: Default sole-owner HL perps strategies with no explicit stop-loss /
+	// #562/#601: Default HL perps strategies with no explicit stop-loss /
 	// trailing-stop fields to stop_loss_atr_mult=1.0. Volatility-adjusted
-	// exchange-side protection out of the box. Runs after peer normalization
-	// so peer strategies (which had StopLossPct=0 set by the normalizer) are
-	// skipped. The five-field nil check matches normalizeHyperliquidPeerStopLosses.
+	// exchange-side protection out of the box. Shared-coin peers are included
+	// because #601 places per-strategy sized reduce-only orders instead of one
+	// shared trigger owner.
 	for i := range cfg.Strategies {
 		sc := &cfg.Strategies[i]
 		if sc.Type != "perps" || sc.Platform != "hyperliquid" {
@@ -656,48 +655,11 @@ func LoadConfig(path string) (*Config, error) {
 	return &cfg, nil
 }
 
-// normalizeHyperliquidPeerStopLosses preserves the single-strategy auto-SL
-// fallback while avoiding accidental reduce-only trigger races for same-coin
-// peer strategies (#494). When multiple HL perps strategies share a coin,
-// omitted stop_loss_* / trailing_stop_* fields are treated as an explicit
-// opt-out; operators can still select one owner with a positive stop_loss_pct,
-// stop_loss_margin_pct, trailing_stop_pct, or trailing_stop_atr_mult.
+// normalizeHyperliquidPeerStopLosses is retained for callers/tests that still
+// reference the old #494 normalizer. It intentionally no-ops after #601:
+// shared-coin HL perps strategies now place per-strategy sized reduce-only
+// protection orders, so omitted stop fields should keep normal defaulting.
 func normalizeHyperliquidPeerStopLosses(strategies []StrategyConfig) {
-	type peerRef struct {
-		ID    string
-		Index int
-	}
-	groups := make(map[string][]peerRef)
-	for i, sc := range strategies {
-		if sc.Type != "perps" || sc.Platform != "hyperliquid" {
-			continue
-		}
-		coin := hyperliquidSymbol(sc.Args)
-		if coin == "" {
-			continue
-		}
-		groups[coin] = append(groups[coin], peerRef{ID: sc.ID, Index: i})
-	}
-
-	coins := make([]string, 0, len(groups))
-	for coin := range groups {
-		coins = append(coins, coin)
-	}
-	sort.Strings(coins)
-	for _, coin := range coins {
-		peers := groups[coin]
-		if len(peers) < 2 {
-			continue
-		}
-		sort.Slice(peers, func(i, j int) bool { return peers[i].ID < peers[j].ID })
-		for _, p := range peers {
-			sc := &strategies[p.Index]
-			if sc.StopLossPct == nil && sc.StopLossMarginPct == nil && sc.TrailingStopPct == nil && sc.TrailingStopATRMult == nil && sc.StopLossATRMult == nil {
-				zero := 0.0
-				sc.StopLossPct = &zero
-			}
-		}
-	}
 }
 
 // hasHyperliquidStopLossOwnership reports whether sc would place a reduce-only
@@ -719,20 +681,35 @@ func hasHyperliquidStopLossOwnership(sc StrategyConfig) bool {
 	return false
 }
 
+// hasHyperliquidTrailingStopOwnership reports whether sc would place a
+// trailing reduce-only HL trigger that cancels and replaces the resting OID
+// as the position moves favorably. Trailing stops are special because the
+// cancel/replace cycle races on the shared on-chain position when two peers
+// both run trailing logic — the second peer's place can land before the
+// first's cancel, briefly doubling the reduce-only quantity (#604 review #5).
+// Fixed-distance triggers (StopLossPct, StopLossMarginPct, StopLossATRMult)
+// are sized per-strategy and don't cancel/replace, so they coexist safely
+// under #601's per-strategy sized protection model.
+func hasHyperliquidTrailingStopOwnership(sc StrategyConfig) bool {
+	if sc.TrailingStopPct != nil && *sc.TrailingStopPct > 0 {
+		return true
+	}
+	if sc.TrailingStopATRMult != nil && *sc.TrailingStopATRMult > 0 {
+		return true
+	}
+	return false
+}
+
 // hyperliquidPeerStrategyErrors returns validation messages for HL perps
-// strategies that share a coin but disagree on MarginMode or exchange Leverage (#491),
-// or that have more than one stop-loss owner (after LoadConfig peer
-// normalization, #494, including trailing stops from #501 and ATR-derived
-// trailing stops from #505). Returns an empty slice when no peer conflicts exist.
+// strategies that share a coin but disagree on MarginMode or exchange Leverage (#491).
+// Returns an empty slice when no peer conflicts exist.
 //
 // HL aggregates positions per coin per account, so two go-trader strategies
 // on the same coin share an on-chain position, margin assignment, and
-// reduce-only stop-loss slots. Mismatched leverage/margin would either fail
+// reduce-only order slots. Mismatched leverage/margin would either fail
 // at first peer trade (HL rejects mode changes on an open position) or
-// silently land in the wrong mode; conflicting stop-loss triggers race on
-// a single position. Per-strategy bookkeeping in SQLite keeps the legs
-// separated when peers agree, so this validation is the only thing
-// preventing a foot-gun config.
+// silently land in the wrong mode. Per-strategy bookkeeping in SQLite keeps
+// the legs separated when peers agree.
 //
 // Sub-account isolation is the only correct path for full per-strategy
 // independence (different direction, leverage, margin); it is intentionally
@@ -750,11 +727,11 @@ func hasHyperliquidStopLossOwnership(sc StrategyConfig) bool {
 // any on-chain conflict.
 func hyperliquidPeerStrategyErrors(strategies []StrategyConfig) []string {
 	type peer struct {
-		ID         string
-		Coin       string
-		MarginMode string
-		Leverage   float64
-		OwnsSL     bool // resolved after LoadConfig peer normalization: true means this strategy owns a trigger
+		ID           string
+		Coin         string
+		MarginMode   string
+		Leverage     float64
+		OwnsTrailing bool // trailing stops cancel/replace and race on shared coin (#604 review #5)
 	}
 	groups := make(map[string][]peer)
 	for _, sc := range strategies {
@@ -766,11 +743,11 @@ func hyperliquidPeerStrategyErrors(strategies []StrategyConfig) []string {
 			continue
 		}
 		groups[coin] = append(groups[coin], peer{
-			ID:         sc.ID,
-			Coin:       coin,
-			MarginMode: sc.MarginMode,
-			Leverage:   sc.Leverage,
-			OwnsSL:     hasHyperliquidStopLossOwnership(sc),
+			ID:           sc.ID,
+			Coin:         coin,
+			MarginMode:   sc.MarginMode,
+			Leverage:     sc.Leverage,
+			OwnsTrailing: hasHyperliquidTrailingStopOwnership(sc),
 		})
 	}
 	var errs []string
@@ -810,17 +787,23 @@ func hyperliquidPeerStrategyErrors(strategies []StrategyConfig) []string {
 				break
 			}
 		}
-		stopLossOwners := make([]string, 0)
+		// Trailing-stop peers race on the shared on-chain position because
+		// each cycle's cancel/replace is non-atomic — peer A can place its
+		// new resting OID before peer B cancels its old one, briefly
+		// doubling the reduce-only quantity. Fixed-distance triggers
+		// (StopLossPct/StopLossATRMult/StopLossMarginPct) are sized
+		// per-strategy and rest forever, so they coexist safely.
+		trailingOwners := make([]string, 0)
 		for _, p := range peers {
-			if p.OwnsSL {
-				stopLossOwners = append(stopLossOwners, p.ID)
+			if p.OwnsTrailing {
+				trailingOwners = append(trailingOwners, p.ID)
 			}
 		}
-		if len(stopLossOwners) > 1 {
-			sort.Strings(stopLossOwners)
+		if len(trailingOwners) > 1 {
+			sort.Strings(trailingOwners)
 			errs = append(errs, fmt.Sprintf(
-				"hyperliquid peers on %s have conflicting stop_loss_pct/trailing_stop_pct/trailing_stop_atr_mult (strategies %s): at most one peer may place a reduce-only SL trigger; the others' OIDs would race on the shared on-chain position",
-				coin, strings.Join(stopLossOwners, ", ")))
+				"hyperliquid peers on %s have multiple trailing-stop owners (strategies %s): trailing_stop_pct/trailing_stop_atr_mult cancel and replace OIDs each cycle, racing on the shared on-chain position; at most one peer may run a trailing stop",
+				coin, strings.Join(trailingOwners, ", ")))
 		}
 	}
 	return errs
