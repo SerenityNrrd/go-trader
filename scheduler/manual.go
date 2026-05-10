@@ -210,20 +210,37 @@ func runManualOpen(args []string) int {
 		effectiveATRMult = *sc.StopLossATRMult
 	}
 
-	// When --atr is omitted, compute a leverage-aware fallback so SL and TPs still
-	// post. Fallback = 0.1*fillPrice/leverage → risks 10% of margin at 1× ATR.
+	// When --atr is omitted, fetch ATR from the same OHLCV/period strategy opens
+	// see via stampEntryATRIfOpened (#689). On fetch failure, fall back to the
+	// leverage-aware heuristic (0.1*fillPrice/leverage = ~10% margin risk at 1× ATR).
+	// Collapses fetch-failure + fallback into a single notifier message so one
+	// event = one Discord/Telegram alert.
 	if !*recordOnly && entryATR == 0 {
 		needsATRProtection := effectiveATRMult > 0 || strategyUsesTieredTPATRClose(sc)
 		if needsATRProtection {
-			if fb, ok := computeFallbackATR(resolvedFillPrice, sc.Leverage); ok {
-				entryATR = fb
-				warnNotifier(notifier, fmt.Sprintf(
-					"[manual-open] %s %s: --atr omitted; using fallback ATR=%.6f (0.1*%.4f/%.2f lev) — pass --atr explicitly for accuracy",
-					strategyID, sc.Symbol, fb, resolvedFillPrice, sc.Leverage))
-			} else {
-				warnNotifier(notifier, fmt.Sprintf(
-					"[manual-open] %s %s: --atr omitted and leverage<=0 — cannot compute fallback; position is NAKED (no ATR-based SL/TP)",
-					strategyID, sc.Symbol))
+			fetched, fetchErr, fetchedOK := fetchManualEntryATR(sc)
+			if fetchedOK {
+				// Mirror stampEntryATRIfOpened's 50%-of-AvgCost plausibility guard.
+				if resolvedFillPrice > 0 && fetched > 0.5*resolvedFillPrice {
+					fetchErr = fmt.Sprintf("fetched ATR=%.6f exceeds 50%% of fill price %.4f", fetched, resolvedFillPrice)
+					fetchedOK = false
+				} else {
+					entryATR = fetched
+					fmt.Fprintf(os.Stderr, "[manual-open] %s %s: --atr omitted; auto-fetched ATR=%.6f (period=14, %s)\n",
+						strategyID, sc.Symbol, fetched, sc.Timeframe)
+				}
+			}
+			if !fetchedOK {
+				if fb, ok := computeFallbackATR(resolvedFillPrice, sc.Leverage); ok {
+					entryATR = fb
+					warnNotifier(notifier, fmt.Sprintf(
+						"[manual-open] %s %s: ATR auto-fetch failed (%s); using fallback ATR=%.6f (0.1*%.4f/%.2f lev) — pass --atr explicitly for accuracy",
+						strategyID, sc.Symbol, fetchErr, fb, resolvedFillPrice, sc.Leverage))
+				} else {
+					warnNotifier(notifier, fmt.Sprintf(
+						"[manual-open] %s %s: ATR auto-fetch failed (%s) and leverage<=0 — cannot compute fallback; position is NAKED (no ATR-based SL/TP)",
+						strategyID, sc.Symbol, fetchErr))
+				}
 			}
 		}
 	}
