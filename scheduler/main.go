@@ -2188,6 +2188,7 @@ func executeSpotResult(sc StrategyConfig, s *StrategyState, db *StateDB, result 
 	}
 	trades := exec.TradesExecuted
 	stampEntryATRIfOpened(s, result.Symbol, result.Indicators)
+	stampPositionRegimeIfOpened(s, result.Symbol, result.Regime)
 	if pos, ok := s.Positions[result.Symbol]; ok {
 		recordPositionOpen(s, sc, exec.OpenTrade, pos)
 	}
@@ -2197,6 +2198,27 @@ func executeSpotResult(sc StrategyConfig, s *StrategyState, db *StateDB, result 
 		detail = fmt.Sprintf("[%s] %s %s @ $%.2f", sc.ID, signalStr, result.Symbol, price)
 	}
 	return trades, detail
+}
+
+// stampPositionRegimeIfOpened stamps regime on the position the first time
+// we observe one with a non-empty label (#733). Called immediately after
+// each Execute*Signal* path on the cycle that drove the open, so for
+// non-deferred opens (spot/topstep/robinhood/okx) the regime is stamped
+// before recordPositionOpen and the trade snapshot sees it. For deferred
+// opens (hyperliquid live), runHyperliquidProtectionSync runs between the
+// execute and recordPositionOpen — the regime is still stamped on the
+// open cycle.
+// Idempotent: pos.Regime is only overwritten when empty so regime-aware
+// multipliers stay frozen for the life of the position.
+func stampPositionRegimeIfOpened(s *StrategyState, symbol, regime string) {
+	if s == nil || regime == "" {
+		return
+	}
+	pos, exists := s.Positions[symbol]
+	if !exists || pos == nil || pos.Regime != "" {
+		return
+	}
+	pos.Regime = regime
 }
 
 func stampEntryATRIfOpened(s *StrategyState, symbol string, indicators map[string]interface{}) {
@@ -2734,6 +2756,7 @@ func executeHyperliquidResultDeferredOpen(sc StrategyConfig, s *StrategyState, r
 	trades := exec.TradesExecuted
 	openTrade := exec.OpenTrade
 	stampEntryATRIfOpened(s, result.Symbol, result.Indicators)
+	stampPositionRegimeIfOpened(s, result.Symbol, result.Regime)
 	if pos, ok := s.Positions[result.Symbol]; ok {
 		stampPositionProtectionSnapshot(pos, sc)
 	}
@@ -2991,6 +3014,7 @@ func executeTopStepResult(sc StrategyConfig, s *StrategyState, db *StateDB, resu
 	}
 	trades := exec.TradesExecuted
 	stampEntryATRIfOpened(s, result.Symbol, result.Indicators)
+	stampPositionRegimeIfOpened(s, result.Symbol, result.Regime)
 	if pos, ok := s.Positions[result.Symbol]; ok {
 		recordPositionOpen(s, sc, exec.OpenTrade, pos)
 	}
@@ -3155,6 +3179,7 @@ func executeRobinhoodResult(sc StrategyConfig, s *StrategyState, db *StateDB, re
 	}
 	trades := exec.TradesExecuted
 	stampEntryATRIfOpened(s, result.Symbol, result.Indicators)
+	stampPositionRegimeIfOpened(s, result.Symbol, result.Regime)
 	if pos, ok := s.Positions[result.Symbol]; ok {
 		recordPositionOpen(s, sc, exec.OpenTrade, pos)
 	}
@@ -3367,6 +3392,7 @@ func executeOKXResult(sc StrategyConfig, s *StrategyState, db *StateDB, result *
 	}
 	trades := exec.TradesExecuted
 	stampEntryATRIfOpened(s, result.Symbol, result.Indicators)
+	stampPositionRegimeIfOpened(s, result.Symbol, result.Regime)
 	if pos, ok := s.Positions[result.Symbol]; ok {
 		recordPositionOpen(s, sc, exec.OpenTrade, pos)
 	}
