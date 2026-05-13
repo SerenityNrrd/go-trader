@@ -15,13 +15,22 @@ import (
 type StatusServer struct {
 	state          *AppState
 	mu             *sync.RWMutex
-	statusToken    string           // if non-empty, /status requires Authorization: Bearer <token>
-	priceSymbols   []string         // BinanceUS spot symbols to always fetch prices for
-	futuresSymbols []string         // CME futures contracts that need TopStep marks (#261)
-	hlPerpsCoins   []string         // HL perps coins that need venue-native marks (#263)
-	okxPerpsCoins  []string         // OKX perps coins that need venue-native marks (#263)
-	strategies     []StrategyConfig // strategy configs for initial capital lookup
-	stateDB        *StateDB         // SQLite DB for /history queries (may be nil)
+	statusToken    string   // if non-empty, /status requires Authorization: Bearer <token>
+	priceSymbols   []string // BinanceUS spot symbols to always fetch prices for
+	futuresSymbols []string // CME futures contracts that need TopStep marks (#261)
+	hlPerpsCoins   []string // HL perps coins that need venue-native marks (#263)
+	okxPerpsCoins  []string // OKX perps coins that need venue-native marks (#263)
+	stateDB        *StateDB // SQLite DB for /history queries (may be nil)
+	candleFetcher  UICandleFetcher
+	candleCache    *UICandleCache
+
+	// strategiesMu protects `strategies` independently of `mu`. SIGHUP holds
+	// the global state `mu.Lock()` across the reload (see config_reload.go);
+	// UpdateStrategies is invoked from that path, so reusing `mu` here would
+	// deadlock. Readers on the /api/strategies path also benefit: they no
+	// longer contend with the scheduler's state writes during dashboard polls.
+	strategiesMu sync.RWMutex
+	strategies   []StrategyConfig // strategy configs for initial capital lookup
 
 	// Throttled logging for repeated mark-fetch failures on the /status
 	// rail. /status can be polled frequently (oncall dashboard, monitoring),
@@ -63,16 +72,21 @@ func NewStatusServer(state *AppState, mu *sync.RWMutex, statusToken string, stra
 		okxPerpsCoins:  okxCoins,
 		strategies:     strategies,
 		stateDB:        stateDB,
+		candleFetcher:  FetchUICandles,
+		candleCache:    NewUICandleCache(30 * time.Second),
 	}
 }
 
 // UpdateStrategies refreshes config-derived status metadata after a hot reload.
-// The caller must coordinate with ss.mu so /status does not build responses from
-// a half-applied config update.
+// Uses the dedicated strategiesMu — not the global state mu — because the SIGHUP
+// reload path already holds mu.Lock() when it calls this through
+// applyHotReloadConfig (config_reload.go), and the global mu is not reentrant.
 func (ss *StatusServer) UpdateStrategies(strategies []StrategyConfig) {
 	if ss == nil {
 		return
 	}
+	ss.strategiesMu.Lock()
+	defer ss.strategiesMu.Unlock()
 	ss.strategies = append([]StrategyConfig(nil), strategies...)
 }
 
@@ -173,6 +187,10 @@ func (ss *StatusServer) Start(port int) {
 	mux.HandleFunc("/status", ss.handleStatus)
 	mux.HandleFunc("/health", ss.handleHealth)
 	mux.HandleFunc("/history", ss.handleHistory)
+	mux.HandleFunc("/dashboard", ss.handleDashboard)
+	mux.HandleFunc("/dashboard/", ss.handleDashboard)
+	mux.HandleFunc("/api/strategies", ss.handleAPIStrategies)
+	mux.HandleFunc("/api/strategies/", ss.handleAPIStrategy)
 
 	listener, boundPort, err := bindWithFallback(port, statusPortMaxAttempts)
 	if err != nil {
@@ -186,6 +204,10 @@ func (ss *StatusServer) Start(port int) {
 		fmt.Printf("[server] NOTICE: requested port %d was in use, bound to %d instead\n", port, boundPort)
 	}
 	fmt.Printf("[server] Status endpoint at http://localhost:%d/status\n", boundPort)
+	fmt.Printf("[server] Dashboard at http://localhost:%d/dashboard\n", boundPort)
+	if ss.statusToken != "" {
+		fmt.Printf("[server] Dashboard API requires the configured status token\n")
+	}
 	go func() {
 		if err := http.Serve(listener, mux); err != nil {
 			fmt.Printf("[server] HTTP server error: %v\n", err)
@@ -345,11 +367,14 @@ func (ss *StatusServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 		ReconciliationGaps: ss.state.ReconciliationGaps,
 	}
 
-	// Build config lookup for EffectiveInitialCapital.
+	// Build config lookup for EffectiveInitialCapital. strategies has its own
+	// mutex now — see the strategiesMu doc on StatusServer.
+	ss.strategiesMu.RLock()
 	cfgByID := make(map[string]StrategyConfig, len(ss.strategies))
 	for _, sc := range ss.strategies {
 		cfgByID[sc.ID] = sc
 	}
+	ss.strategiesMu.RUnlock()
 
 	for id, s := range ss.state.Strategies {
 		pv := PortfolioValue(s, prices)
