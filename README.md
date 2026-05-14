@@ -14,7 +14,11 @@ Join the Discord: [https://discord.gg/46d7Fa2dXz](https://discord.gg/46d7Fa2dXz)
 
 ## Getting Started
 
-**Quick flow for a new server:** tell OpenClaw or Hermes `install https://github.com/richkuo/go-trader and init`.
+**Quick flow for a new server:** tell OpenClaw or Hermes:
+
+```
+install https://github.com/richkuo/go-trader and init.
+```
 
 ### AI Agent Setup (Recommended)
 
