@@ -34,7 +34,19 @@ var probeArgv = []string{
 	// instead of every cycle's argparse rejecting the cycle's argv.
 	"--mark-price=0",
 	"--ohlcv-limit", "200",
-	"--regime-windows-json", "",
+	"--regime-windows-spec-json", `{"default":{"classifier":"adx","period":14,"adx_threshold":20}}`,
+	"--regime-atr-window", "",
+	"--probe-only",
+}
+
+// probeCompositeArgv exercises classifier=composite in parse_regime_windows_spec_json
+// so a stale Python missing the composite branch fails startup (#795 review).
+var probeCompositeArgv = []string{
+	"probe", "BTC", "1h",
+	"--strategy-refs", `{"open":{"name":"probe","params":{}},"closes":[{"name":"probe_close","params":{}}]}`,
+	"--mark-price=0",
+	"--ohlcv-limit", "200",
+	"--regime-windows-spec-json", `{"macro":{"classifier":"composite","period":14,"thresholds":{"return_pct":0.05,"range_pct":0.03,"adx":25}}}`,
 	"--regime-atr-window", "",
 	"--probe-only",
 }
@@ -89,6 +101,9 @@ func probeCheckScripts(cfg *Config) error {
 	scripts := uniqueCheckScripts(cfg)
 	for _, script := range scripts {
 		if err := probeOneCheckScriptFn(script, probeArgv); err != nil {
+			return err
+		}
+		if err := probeOneCheckScriptFn(script, probeCompositeArgv); err != nil {
 			return err
 		}
 		// HL exposes --fetch-atr (#689) for manual-open ATR auto-fetch; probe
