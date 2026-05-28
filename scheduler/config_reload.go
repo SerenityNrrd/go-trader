@@ -159,6 +159,13 @@ func applyHotReloadConfig(cfg, next *Config, state *AppState, notifier *MultiNot
 			addChange("strategy[%s].regime_directional_policy: shape updated", sc.ID)
 			sc.RegimeDirectionalPolicy = ns.RegimeDirectionalPolicy
 		}
+		if !regimeWindowFieldsEqual(*sc, ns) {
+			addChange("strategy[%s].regime_*_window: gate=%q atr=%q directional=%q updated",
+				sc.ID, ns.RegimeGateWindow, ns.RegimeATRWindow, ns.RegimeDirectionalWindow)
+			sc.RegimeGateWindow = ns.RegimeGateWindow
+			sc.RegimeATRWindow = ns.RegimeATRWindow
+			sc.RegimeDirectionalWindow = ns.RegimeDirectionalWindow
+		}
 	}
 
 	if portfolioRiskMaxDrawdown(cfg.PortfolioRisk) != portfolioRiskMaxDrawdown(next.PortfolioRisk) {
@@ -422,6 +429,12 @@ func validateHotReloadStateCompatible(cfg, next *Config, state *AppState) error 
 					sc.ID))
 			}
 		}
+		// #792: per-feature regime window selectors route live gate/ATR/policy
+		// lookups; changing them while open would rebind stamped semantics.
+		if strategyHasOpenPositions(stateStrategy(state, sc.ID)) && !regimeWindowFieldsEqual(sc, ns) {
+			errs = append(errs, fmt.Sprintf("strategy[%s] regime_*_window changed with open positions (flatten first or restart after close)",
+				sc.ID))
+		}
 		// #716 item 1: sl_after rules are armed at the next cleared TP tier; a
 		// mid-position add/remove/mode change would engage the post-TP machinery
 		// (and, for trail_from_here, the trailing walker) without the validation
@@ -465,6 +478,9 @@ func strategyRestartShape(sc StrategyConfig) StrategyConfig {
 	sc.AllowShorts = false           // #656: legacy field — direction change is what gates hot reload
 	sc.InvertSignal = false          // #775: hot-reloadable; state-compat blocks change while open. Needed in shape mask so the immutable-fields DeepEqual doesn't flag a pure invert_signal toggle as "restart required" (parallel to Direction above).
 	sc.RegimeDirectionalPolicy = nil // #779: hot-reloadable; state-compat blocks add/remove/reshape while open
+	sc.RegimeGateWindow = ""         // #792: hot-reloadable when flat; state-compat blocks change while open
+	sc.RegimeATRWindow = ""          // #792: hot-reloadable when flat; state-compat blocks change while open
+	sc.RegimeDirectionalWindow = ""  // #792: hot-reloadable when flat; state-compat blocks change while open
 	return sc
 }
 

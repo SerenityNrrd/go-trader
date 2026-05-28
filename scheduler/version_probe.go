@@ -33,6 +33,9 @@ var probeArgv = []string{
 	// so a stale Python that doesn't accept the flag fails startup loudly
 	// instead of every cycle's argparse rejecting the cycle's argv.
 	"--mark-price=0",
+	"--ohlcv-limit", "200",
+	"--regime-windows-json", "",
+	"--regime-atr-window", "",
 	"--probe-only",
 }
 
