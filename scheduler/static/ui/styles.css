@@ -340,6 +340,14 @@ h3 {
   overflow-wrap: anywhere;
 }
 
+.status-grid dd.val-positive {
+  color: var(--green);
+}
+
+.status-grid dd.val-negative {
+  color: var(--red);
+}
+
 .positions {
   border-top: 1px solid var(--line);
   padding-top: 14px;

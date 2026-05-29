@@ -162,14 +162,15 @@
     const status = await getJSON("/api/strategies/" + encodeURIComponent(state.activeID) + "/status");
     els.statusDot.className = "status-dot ok";
     els.statusLabel.textContent = "Live";
+    const drawdownPct = status.risk_state && status.risk_state.current_drawdown_pct;
     const fields = [
       ["Cash", fmtMoney(status.cash)],
       ["Initial", fmtMoney(status.initial_capital)],
       ["Value", fmtMoney(status.portfolio_value)],
-      ["PnL", fmtSignedMoney(status.pnl)],
-      ["PnL %", fmtPct(status.pnl_pct)],
+      ["PnL", fmtSignedMoney(status.pnl), status.pnl],
+      ["PnL %", fmtPct(status.pnl_pct), status.pnl_pct],
       ["Regime", status.regime || "-"],
-      ["Drawdown", fmtPct(status.risk_state && status.risk_state.current_drawdown_pct)],
+      ["Drawdown", fmtPct(drawdownPct), drawdownPct, true],
       ["Leverage", fmtNumber(status.leverage)],
       ["Trades", String(status.lifetime_stats ? status.lifetime_stats.positions_opened || 0 : 0)],
       ["W/L", winLoss(status)],
@@ -177,7 +178,9 @@
       ["Sharpe", status.sharpe ? fmtNumber(status.sharpe) : "-"],
     ];
     els.statusGrid.innerHTML = fields.map(function (field) {
-      return "<dt>" + escapeHTML(field[0]) + "</dt><dd>" + escapeHTML(field[1]) + "</dd>";
+      const klass = field.length > 2 ? pnlClass(field[2], field[3]) : "";
+      const dd = klass ? '<dd class="' + klass + '">' : "<dd>";
+      return "<dt>" + escapeHTML(field[0]) + "</dt>" + dd + escapeHTML(field[1]) + "</dd>";
     }).join("");
     renderPositions(status.positions || {}, status.option_positions || {});
   }
@@ -247,6 +250,14 @@
   function fmtNumber(value) {
     if (value === undefined || value === null || Number.isNaN(Number(value))) return "-";
     return Number(value).toLocaleString(undefined, { maximumFractionDigits: 4 });
+  }
+
+  function pnlClass(value, invert) {
+    const n = Number(value);
+    if (value === undefined || value === null || Number.isNaN(n) || n === 0) return "";
+    const positive = n > 0;
+    if (invert) return positive ? "val-negative" : "val-positive";
+    return positive ? "val-positive" : "val-negative";
   }
 
   function escapeHTML(value) {
