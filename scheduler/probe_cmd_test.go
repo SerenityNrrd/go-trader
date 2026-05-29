@@ -19,6 +19,39 @@ func TestRunProbeMissingConfig(t *testing.T) {
 	}
 }
 
+// TestRunProbeReturnsExitProbeFailureOnScriptFailure locks the exit code
+// update.sh and systemd RestartPreventExitStatus= depend on.
+func TestRunProbeReturnsExitProbeFailureOnScriptFailure(t *testing.T) {
+	orig := probeOneCheckScriptFn
+	defer func() { probeOneCheckScriptFn = orig }()
+	probeOneCheckScriptFn = func(script string, argv []string) error {
+		return formatProbeFailure(script, os.ErrInvalid, "error: unrecognized arguments: --probe-only", "")
+	}
+
+	tmp := t.TempDir()
+	cfgPath := filepath.Join(tmp, "config.json")
+	body, _ := json.Marshal(map[string]any{
+		"interval_seconds": 60,
+		"strategies": []any{
+			map[string]any{
+				"id":               "spot-a",
+				"type":             "spot",
+				"script":           "shared_scripts/check_strategy.py",
+				"args":             []string{"sma", "BTC/USDT", "1h"},
+				"interval_seconds": 60,
+				"capital":          1000.0,
+			},
+		},
+	})
+	if err := os.WriteFile(cfgPath, body, 0o644); err != nil {
+		t.Fatalf("write cfg: %v", err)
+	}
+	rc := runProbe([]string{"--config", cfgPath})
+	if rc != ExitProbeFailure {
+		t.Fatalf("probe script failure should return %d, got %d", ExitProbeFailure, rc)
+	}
+}
+
 // TestRunProbeNoStrategies: an empty strategies list means no scripts to
 // probe, so probe trivially succeeds — this is acceptable: a config with no
 // configured strategies has no Python contract to validate.

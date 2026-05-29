@@ -192,5 +192,15 @@ func formatProbeFailure(script string, runErr error, stderr, stdout string) erro
 	if detail == "" {
 		detail = runErr.Error()
 	}
+	if probeFailureScriptMissing(detail) {
+		return fmt.Errorf("%s missing from deploy tree (sync Python with binary, e.g. scripts/update.sh): %s", script, detail)
+	}
 	return fmt.Errorf("%s rejected --probe-only argv (binary/Python version mismatch?): %s", script, detail)
+}
+
+func probeFailureScriptMissing(detail string) bool {
+	// Python reports a missing probe script as "can't open file '…': [Errno 2] …".
+	// Avoid broader ENOENT substrings so internal FileNotFoundError from a real
+	// script is not mislabeled as a deploy-tree gap.
+	return strings.Contains(detail, "can't open file")
 }
