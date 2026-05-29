@@ -31,6 +31,8 @@ type StatusServer struct {
 	// longer contend with the scheduler's state writes during dashboard polls.
 	strategiesMu sync.RWMutex
 	strategies   []StrategyConfig // strategy configs for initial capital lookup
+	configPath   string           // live config file for tuner Apply (#811)
+	regime       *RegimeConfig    // global regime settings for simulate preview
 
 	// Throttled logging for repeated mark-fetch failures on the /status
 	// rail. /status can be polled frequently (oncall dashboard, monitoring),
