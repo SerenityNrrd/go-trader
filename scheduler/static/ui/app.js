@@ -59,7 +59,7 @@
         horzLines: { color: dark ? "#2b342f" : "#eef1eb" },
       },
       rightPriceScale: { borderColor: dark ? "#3a4540" : "#d8ddd2" },
-      timeScale: { borderColor: dark ? "#3a4540" : "#d8ddd2" },
+      timeScale: { borderColor: dark ? "#3a4540" : "#d8ddd2", timeVisible: true },
     };
   }
 
@@ -84,17 +84,11 @@
     applyChartTheme();
   }
 
-  function initDarkMode() {
-    updateDarkModeToggle();
-    applyChartTheme();
-  }
-
   function initChart() {
     if (state.chart) return;
-    state.chart = LightweightCharts.createChart(els.chart, Object.assign({
-      timeScale: { timeVisible: true },
+    state.chart = LightweightCharts.createChart(els.chart, Object.assign({}, chartThemeOptions(), {
       crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
-    }, chartThemeOptions()));
+    }));
     state.series = state.chart.addCandlestickSeries({
       upColor: "#0f8a5f",
       downColor: "#c23b3b",
@@ -295,7 +289,7 @@
   }
 
   async function boot() {
-    initDarkMode();
+    updateDarkModeToggle();
     initChart();
     const resp = await getJSON("/api/strategies");
     state.strategies = resp.strategies || [];
