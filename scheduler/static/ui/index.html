@@ -4,11 +4,20 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>go-trader dashboard</title>
+    <script>
+      (function () {
+        try {
+          if (window.localStorage.getItem("goTraderDarkMode") === "1") {
+            document.documentElement.classList.add("dark");
+          }
+        } catch (e) {}
+      })();
+    </script>
     <link rel="stylesheet" href="/dashboard/styles.css">
   </head>
   <body>
     <div class="shell">
-      <aside class="sidebar">
+      <aside id="app-sidebar" class="sidebar" tabindex="-1">
         <div class="brand">
           <div class="brand-mark">gt</div>
           <div>
@@ -25,13 +34,32 @@
 
       <main class="workspace">
         <header class="topbar">
-          <div>
-            <h2 id="active-title">Dashboard</h2>
-            <p id="active-subtitle">Select a strategy</p>
+          <div class="topbar-start">
+            <button
+              id="sidebar-toggle"
+              class="icon-button sidebar-toggle"
+              type="button"
+              title="Menu"
+              aria-label="Open menu"
+              aria-expanded="false"
+              aria-controls="app-sidebar"
+            >
+              <span class="sidebar-toggle-icon" aria-hidden="true"></span>
+            </button>
+            <div class="topbar-heading">
+              <div class="topbar-title-row">
+                <h2 id="active-title">Dashboard</h2>
+                <span id="regime-badge" class="regime-badge" hidden></span>
+              </div>
+              <p id="active-subtitle">Select a strategy</p>
+            </div>
           </div>
           <div class="toolbar">
             <button id="view-mode-button" class="view-mode-button" type="button" aria-pressed="false">Detail</button>
-            <button id="refresh-button" class="icon-button" title="Refresh" aria-label="Refresh">
+            <button id="dark-mode-toggle" class="icon-button" type="button" title="Dark mode" aria-label="Toggle dark mode" aria-pressed="false">
+              <span id="dark-mode-icon" aria-hidden="true">☾</span>
+            </button>
+            <button id="refresh-button" class="icon-button" type="button" title="Refresh" aria-label="Refresh">
               <span aria-hidden="true">R</span>
             </button>
             <select id="refresh-interval" aria-label="Refresh interval">
@@ -62,32 +90,33 @@
             </table>
           </div>
           <div id="detail-panel" class="detail-panel">
-          <div class="chart-panel">
-            <div id="chart"></div>
-            <div id="empty-chart" class="empty-state">No candles yet</div>
-          </div>
-          <aside class="status-panel">
-            <div class="status-header">
-              <span id="status-dot" class="status-dot"></span>
-              <span id="status-label">Waiting</span>
+            <div class="chart-panel">
+              <div id="chart"></div>
+              <div id="empty-chart" class="empty-state">No candles yet</div>
             </div>
-            <form id="auth-panel" class="auth-panel" hidden>
-              <label>
-                <span>Status token</span>
-                <input id="auth-token" type="password" autocomplete="current-password" placeholder="Status token">
-              </label>
-              <button type="submit">Save</button>
-            </form>
-            <dl id="status-grid" class="status-grid"></dl>
-            <div class="positions">
-              <h3>Positions</h3>
-              <div id="positions-list"></div>
-            </div>
-          </aside>
+            <aside class="status-panel">
+              <div class="status-header">
+                <span id="status-dot" class="status-dot"></span>
+                <span id="status-label">Waiting</span>
+              </div>
+              <form id="auth-panel" class="auth-panel" hidden>
+                <label>
+                  <span>Status token</span>
+                  <input id="auth-token" type="password" autocomplete="current-password" placeholder="Status token">
+                </label>
+                <button type="submit">Save</button>
+              </form>
+              <dl id="status-grid" class="status-grid"></dl>
+              <div class="positions">
+                <h3>Positions</h3>
+                <div id="positions-list"></div>
+              </div>
+            </aside>
           </div>
         </section>
       </main>
     </div>
+    <div id="sidebar-backdrop" class="sidebar-backdrop" aria-hidden="true"></div>
     <script src="/dashboard/lightweight-charts.standalone.production.js"></script>
     <script src="/dashboard/app.js"></script>
   </body>

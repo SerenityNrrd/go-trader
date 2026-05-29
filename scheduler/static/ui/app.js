@@ -1,5 +1,8 @@
 (function () {
+  const SIDEBAR_STORAGE_KEY = "goTraderSidebarOpen";
+  const MOBILE_SIDEBAR_MQ = "(max-width: 980px)";
   const VIEW_MODE_KEY = "goTraderViewMode";
+
   const state = {
     strategies: [],
     overviewRows: [],
@@ -10,16 +13,22 @@
     chart: null,
     series: null,
     timer: 0,
+    sparklines: {},
   };
+
+  const SPARKLINE_LIMIT = 40;
 
   const els = {
     count: document.getElementById("strategy-count"),
     list: document.getElementById("strategy-list"),
     search: document.getElementById("strategy-search"),
     title: document.getElementById("active-title"),
+    regimeBadge: document.getElementById("regime-badge"),
     subtitle: document.getElementById("active-subtitle"),
     chart: document.getElementById("chart"),
     empty: document.getElementById("empty-chart"),
+    darkToggle: document.getElementById("dark-mode-toggle"),
+    darkIcon: document.getElementById("dark-mode-icon"),
     refresh: document.getElementById("refresh-button"),
     viewMode: document.getElementById("view-mode-button"),
     interval: document.getElementById("refresh-interval"),
@@ -29,10 +38,100 @@
     authToken: document.getElementById("auth-token"),
     statusGrid: document.getElementById("status-grid"),
     positions: document.getElementById("positions-list"),
+    sidebar: document.getElementById("app-sidebar"),
+    sidebarToggle: document.getElementById("sidebar-toggle"),
+    sidebarBackdrop: document.getElementById("sidebar-backdrop"),
+    workspace: document.querySelector(".workspace"),
     overviewPanel: document.getElementById("overview-panel"),
     overviewBody: document.getElementById("overview-body"),
     detailPanel: document.getElementById("detail-panel"),
   };
+
+  function isMobileSidebar() {
+    return window.matchMedia(MOBILE_SIDEBAR_MQ).matches;
+  }
+
+  function setSidebarOpen(open) {
+    if (!isMobileSidebar()) {
+      document.body.classList.remove("sidebar-open");
+      if (els.workspace) {
+        els.workspace.inert = false;
+      }
+      if (els.sidebarToggle) {
+        els.sidebarToggle.setAttribute("aria-expanded", "false");
+        els.sidebarToggle.setAttribute("aria-label", "Open menu");
+      }
+      if (els.sidebarBackdrop) {
+        els.sidebarBackdrop.setAttribute("aria-hidden", "true");
+      }
+      try {
+        sessionStorage.removeItem(SIDEBAR_STORAGE_KEY);
+      } catch (_err) {
+        /* sessionStorage unavailable */
+      }
+      return;
+    }
+    const wasOpen = document.body.classList.contains("sidebar-open");
+    document.body.classList.toggle("sidebar-open", open);
+    if (els.sidebarToggle) {
+      els.sidebarToggle.setAttribute("aria-expanded", open ? "true" : "false");
+      els.sidebarToggle.setAttribute("aria-label", open ? "Close menu" : "Open menu");
+    }
+    if (els.sidebarBackdrop) {
+      els.sidebarBackdrop.setAttribute("aria-hidden", open ? "false" : "true");
+    }
+    if (els.workspace) {
+      els.workspace.inert = open;
+    }
+    if (open && els.sidebar) {
+      els.sidebar.focus();
+    } else if (!open && wasOpen && els.sidebarToggle) {
+      els.sidebarToggle.focus();
+    }
+    try {
+      if (open) {
+        sessionStorage.setItem(SIDEBAR_STORAGE_KEY, "1");
+      } else {
+        sessionStorage.removeItem(SIDEBAR_STORAGE_KEY);
+      }
+    } catch (_err) {
+      /* sessionStorage unavailable */
+    }
+  }
+
+  function readStoredSidebarOpen() {
+    try {
+      return sessionStorage.getItem(SIDEBAR_STORAGE_KEY) === "1";
+    } catch (_err) {
+      return false;
+    }
+  }
+
+  function initSidebar() {
+    if (!els.sidebarToggle || !els.sidebarBackdrop) return;
+
+    function syncSidebarForViewport() {
+      if (!isMobileSidebar()) {
+        setSidebarOpen(false);
+        return;
+      }
+      setSidebarOpen(readStoredSidebarOpen());
+    }
+
+    els.sidebarToggle.addEventListener("click", function () {
+      setSidebarOpen(!document.body.classList.contains("sidebar-open"));
+    });
+    els.sidebarBackdrop.addEventListener("click", function () {
+      setSidebarOpen(false);
+    });
+    window.matchMedia(MOBILE_SIDEBAR_MQ).addEventListener("change", syncSidebarForViewport);
+    document.addEventListener("keydown", function (event) {
+      if (event.key === "Escape" && document.body.classList.contains("sidebar-open")) {
+        setSidebarOpen(false);
+      }
+    });
+    syncSidebarForViewport();
+  }
 
   function authHeaders() {
     const token = window.localStorage.getItem("goTraderStatusToken");
@@ -49,6 +148,48 @@
     }
     return res.json();
   }
+
+  function isDarkMode() {
+    return document.documentElement.classList.contains("dark");
+  }
+
+  function chartThemeOptions() {
+    const dark = isDarkMode();
+    return {
+      layout: {
+        background: { type: "solid", color: dark ? "#1a211c" : "#ffffff" },
+        textColor: dark ? "#c5cec8" : "#334139",
+      },
+      grid: {
+        vertLines: { color: dark ? "#2b342f" : "#eef1eb" },
+        horzLines: { color: dark ? "#2b342f" : "#eef1eb" },
+      },
+      rightPriceScale: { borderColor: dark ? "#3a4540" : "#d8ddd2" },
+      timeScale: { borderColor: dark ? "#3a4540" : "#d8ddd2", timeVisible: true },
+    };
+  }
+
+  function applyChartTheme() {
+    if (!state.chart) return;
+    state.chart.applyOptions(chartThemeOptions());
+  }
+
+  function updateDarkModeToggle() {
+    const dark = isDarkMode();
+    els.darkToggle.setAttribute("aria-pressed", dark ? "true" : "false");
+    els.darkToggle.title = dark ? "Light mode" : "Dark mode";
+    els.darkIcon.textContent = dark ? "☀" : "☾";
+  }
+
+  function setDarkMode(enabled) {
+    document.documentElement.classList.toggle("dark", enabled);
+    try {
+      window.localStorage.setItem("goTraderDarkMode", enabled ? "1" : "0");
+    } catch (e) {}
+    updateDarkModeToggle();
+    applyChartTheme();
+  }
+
 
   function loadViewMode() {
     const saved = window.localStorage.getItem(VIEW_MODE_KEY);
@@ -77,19 +218,9 @@
 
   function initChart() {
     if (state.chart) return;
-    state.chart = LightweightCharts.createChart(els.chart, {
-      layout: {
-        background: { type: "solid", color: "#ffffff" },
-        textColor: "#334139",
-      },
-      grid: {
-        vertLines: { color: "#eef1eb" },
-        horzLines: { color: "#eef1eb" },
-      },
-      rightPriceScale: { borderColor: "#d8ddd2" },
-      timeScale: { borderColor: "#d8ddd2", timeVisible: true },
+    state.chart = LightweightCharts.createChart(els.chart, Object.assign({}, chartThemeOptions(), {
       crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
-    });
+    }));
     state.series = state.chart.addCandlestickSeries({
       upColor: "#0f8a5f",
       downColor: "#c23b3b",
@@ -113,12 +244,16 @@
     }, {});
   }
 
-  function renderStrategies() {
+  function filteredStrategies() {
     const query = els.search.value.trim().toLowerCase();
-    const filtered = state.strategies.filter(function (s) {
+    return state.strategies.filter(function (s) {
       const haystack = [s.id, s.platform, s.symbol, s.timeframe, s.strategy].join(" ").toLowerCase();
       return haystack.includes(query);
     });
+  }
+
+  function renderStrategies() {
+    const filtered = filteredStrategies();
     els.count.textContent = filtered.length + " strategies";
     els.list.innerHTML = "";
     const groups = groupStrategies(filtered);
@@ -133,7 +268,10 @@
         button.type = "button";
         button.dataset.id = strategy.id;
         button.innerHTML =
-          '<span class="strategy-id"></span><span class="strategy-symbol"></span><span class="strategy-meta"></span>';
+          '<span class="strategy-id"></span>' +
+          '<canvas class="strategy-sparkline" width="48" height="28" aria-hidden="true"></canvas>' +
+          '<span class="strategy-symbol"></span>' +
+          '<span class="strategy-meta"></span>';
         button.querySelector(".strategy-id").textContent = strategy.id;
         button.querySelector(".strategy-symbol").textContent = strategy.symbol || "-";
         button.querySelector(".strategy-meta").textContent =
@@ -142,8 +280,72 @@
           selectStrategy(strategy.id).catch(handleRefreshError);
         });
         els.list.appendChild(button);
+        const cached = state.sparklines[strategy.id];
+        if (cached) {
+          drawSparkline(button.querySelector(".strategy-sparkline"), cached);
+        }
       });
     });
+    loadSparklines(filtered.map(function (s) {
+      return s.id;
+    }));
+  }
+
+  function drawSparkline(canvas, points) {
+    if (!canvas || !points || points.length < 2) {
+      return;
+    }
+    const dpr = window.devicePixelRatio || 1;
+    const cssW = canvas.clientWidth || 48;
+    const cssH = canvas.clientHeight || 28;
+    canvas.width = Math.round(cssW * dpr);
+    canvas.height = Math.round(cssH * dpr);
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, cssW, cssH);
+
+    const values = points.map(function (p) {
+      return Number(p.v);
+    });
+    const min = Math.min.apply(null, values);
+    const max = Math.max.apply(null, values);
+    const span = max - min || 1;
+    const pad = 2;
+    const up = values[values.length - 1] >= values[0];
+    const color = up ? "#0f8a5f" : "#c23b3b";
+
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1.5;
+    ctx.lineJoin = "round";
+    ctx.lineCap = "round";
+    ctx.beginPath();
+    values.forEach(function (value, index) {
+      const x = pad + (index / (values.length - 1)) * (cssW - pad * 2);
+      const y = pad + (1 - (value - min) / span) * (cssH - pad * 2);
+      if (index === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+  }
+
+  async function loadSparklines(ids) {
+    const unique = Array.from(new Set(ids));
+    await Promise.all(unique.map(async function (id) {
+      try {
+        const resp = await getJSON(
+          "/api/strategies/" + encodeURIComponent(id) + "/equity?limit=" + SPARKLINE_LIMIT
+        );
+        const points = resp.points || [];
+        state.sparklines[id] = points;
+        const button = els.list.querySelector('.strategy-button[data-id="' + CSS.escape(id) + '"]');
+        if (button) {
+          drawSparkline(button.querySelector(".strategy-sparkline"), points);
+        }
+      } catch (_err) {
+        // Sidebar sparklines are best-effort; ignore per-strategy failures.
+      }
+    }));
   }
 
   function activeStrategy() {
@@ -155,6 +357,7 @@
   async function selectStrategy(id, options) {
     const opts = options || {};
     state.activeID = id;
+    updateRegimeBadge("");
     const strategy = activeStrategy();
     if (strategy) {
       els.title.textContent = strategy.id;
@@ -165,6 +368,9 @@
       state.viewMode = "detail";
       saveViewMode(state.viewMode);
       applyViewMode();
+    }
+    if (isMobileSidebar()) {
+      setSidebarOpen(false);
     }
     await refreshAll();
   }
@@ -197,19 +403,52 @@
     if (candles.length) state.chart.timeScale().fitContent();
   }
 
+  function humanizeRegimeLabel(label) {
+    return String(label).replace(/_/g, " ");
+  }
+
+  function regimeBadgeClass(label) {
+    const key = String(label || "").toLowerCase();
+    if (key.startsWith("trending_up") || key === "strong_trend_up" || key === "bull") {
+      return "regime-badge--bull";
+    }
+    if (key.startsWith("trending_down") || key === "strong_trend_down" || key === "bear") {
+      return "regime-badge--bear";
+    }
+    if (key.startsWith("ranging") || key === "weak_trend" || key === "neutral" || key === "default") {
+      return "regime-badge--neutral";
+    }
+    return "regime-badge--unknown";
+  }
+
+  function updateRegimeBadge(regime) {
+    const label = String(regime || "").trim();
+    if (!label || label === "-") {
+      els.regimeBadge.hidden = true;
+      els.regimeBadge.textContent = "";
+      els.regimeBadge.className = "regime-badge";
+      return;
+    }
+    els.regimeBadge.className = "regime-badge " + regimeBadgeClass(label);
+    els.regimeBadge.textContent = humanizeRegimeLabel(label);
+    els.regimeBadge.hidden = false;
+  }
+
   async function refreshStatus() {
     if (!state.activeID) return;
     const status = await getJSON("/api/strategies/" + encodeURIComponent(state.activeID) + "/status");
+    updateRegimeBadge(status.regime);
     els.statusDot.className = "status-dot ok";
     els.statusLabel.textContent = "Live";
+    const drawdownPct = status.risk_state && status.risk_state.current_drawdown_pct;
     const fields = [
       ["Cash", fmtMoney(status.cash)],
       ["Initial", fmtMoney(status.initial_capital)],
       ["Value", fmtMoney(status.portfolio_value)],
-      ["PnL", fmtSignedMoney(status.pnl)],
-      ["PnL %", fmtPct(status.pnl_pct)],
+      ["PnL", fmtSignedMoney(status.pnl), status.pnl],
+      ["PnL %", fmtPct(status.pnl_pct), status.pnl_pct],
       ["Regime", status.regime || "-"],
-      ["Drawdown", fmtPct(status.risk_state && status.risk_state.current_drawdown_pct)],
+      ["Drawdown", fmtPct(drawdownPct), drawdownPct, true],
       ["Leverage", fmtNumber(status.leverage)],
       ["Trades", String(status.lifetime_stats ? status.lifetime_stats.positions_opened || 0 : 0)],
       ["W/L", winLoss(status)],
@@ -217,7 +456,9 @@
       ["Sharpe", status.sharpe ? fmtNumber(status.sharpe) : "-"],
     ];
     els.statusGrid.innerHTML = fields.map(function (field) {
-      return "<dt>" + escapeHTML(field[0]) + "</dt><dd>" + escapeHTML(field[1]) + "</dd>";
+      const klass = field.length > 2 ? pnlClass(field[2], field[3]) : "";
+      const dd = klass ? '<dd class="' + klass + '">' : "<dd>";
+      return "<dt>" + escapeHTML(field[0]) + "</dt>" + dd + escapeHTML(field[1]) + "</dd>";
     }).join("");
     renderPositions(status.positions || {}, status.option_positions || {});
   }
@@ -248,6 +489,7 @@
     return '<div class="position-row"><strong>' + escapeHTML(symbol) + '</strong><span class="' + klass + '">' +
       escapeHTML(side || "-") + '</span><span>' + escapeHTML(detail) + '</span><span></span></div>';
   }
+
 
   function sortValue(row, key) {
     if (key === "pnl_pct" || key === "win_rate" || key === "sharpe") {
@@ -283,12 +525,12 @@
   function renderOverviewTable() {
     const rows = sortedOverviewRows();
     els.overviewBody.innerHTML = rows.map(function (row) {
-      const pnlClass = row.pnl_pct > 0 ? "pnl-pos" : row.pnl_pct < 0 ? "pnl-neg" : "";
+      const pnlClassName = row.pnl_pct > 0 ? "pnl-pos" : row.pnl_pct < 0 ? "pnl-neg" : "";
       return '<tr class="overview-row' + (row.id === state.activeID ? " active" : "") + '" data-id="' + escapeHTML(row.id) + '">' +
         "<td>" + escapeHTML(row.id) + "</td>" +
         "<td>" + escapeHTML(row.platform || "-") + "</td>" +
         "<td>" + escapeHTML(row.symbol || "-") + "</td>" +
-        '<td class="' + pnlClass + '">' + escapeHTML(fmtPct(row.pnl_pct)) + "</td>" +
+        '<td class="' + pnlClassName + '">' + escapeHTML(fmtPct(row.pnl_pct)) + "</td>" +
         "<td>" + escapeHTML(row.win_rate ? fmtPct(row.win_rate) : "-") + "</td>" +
         "<td>" + escapeHTML(row.sharpe ? fmtNumber(row.sharpe) : "-") + "</td>" +
         "<td>" + escapeHTML(row.regime || "-") + "</td>" +
@@ -308,14 +550,6 @@
     els.positions.innerHTML = '<div class="position-row"><span>Table view</span><span>Select a row for detail</span></div>';
   }
 
-  async function refreshAll() {
-    if (state.viewMode === "table") {
-      await refreshOverview();
-      return;
-    }
-    await Promise.all([refreshChart(), refreshStatus()]);
-  }
-
   function handleRefreshError(err) {
     if (err.status === 401) {
       showAuthPrompt();
@@ -324,6 +558,24 @@
     els.statusDot.className = "status-dot error";
     els.statusLabel.textContent = "Error";
     els.statusGrid.innerHTML = "<dt>Message</dt><dd>" + escapeHTML(err.message) + "</dd>";
+  }
+
+  async function refreshAll() {
+    try {
+      if (state.viewMode === "table") {
+        await refreshOverview();
+        return;
+      }
+      await Promise.all([
+        refreshChart(),
+        refreshStatus(),
+        loadSparklines(filteredStrategies().map(function (s) {
+          return s.id;
+        })),
+      ]);
+    } catch (err) {
+      handleRefreshError(err);
+    }
   }
 
   function scheduleRefresh() {
@@ -356,6 +608,14 @@
     return Number(value).toLocaleString(undefined, { maximumFractionDigits: 4 });
   }
 
+  function pnlClass(value, invert) {
+    const n = Number(value);
+    if (value === undefined || value === null || Number.isNaN(n) || n === 0) return "";
+    const positive = n > 0;
+    if (invert) return positive ? "val-negative" : "val-positive";
+    return positive ? "val-positive" : "val-negative";
+  }
+
   function escapeHTML(value) {
     return String(value).replace(/[&<>"']/g, function (ch) {
       return ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[ch];
@@ -365,6 +625,7 @@
   async function boot() {
     state.viewMode = loadViewMode();
     applyViewMode();
+    updateDarkModeToggle();
     initChart();
     const resp = await getJSON("/api/strategies");
     state.strategies = resp.strategies || [];
@@ -377,7 +638,11 @@
     scheduleRefresh();
   }
 
+  initSidebar();
   els.search.addEventListener("input", renderStrategies);
+  els.darkToggle.addEventListener("click", function () {
+    setDarkMode(!isDarkMode());
+  });
   els.refresh.addEventListener("click", function () {
     refreshAll().catch(handleRefreshError);
   });
