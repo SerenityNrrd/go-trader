@@ -231,6 +231,32 @@ def test_load_strategy_config_rejects_unknown_id(tmp_path):
         run_backtest.load_strategy_config(path, "hl-other-eth")
 
 
+def test_load_strategy_config_rejects_dynamic_regime_close_single(tmp_path):
+    path = _write_config(tmp_path, version=13, strategies=[
+        {
+            "id": "hl-dyn-btc",
+            "open_strategy": {"name": "tema_cross_bd"},
+            "close_strategy": {"name": "tiered_tp_atr_live_regime_dynamic", "params": {}},
+        },
+    ])
+    with pytest.raises(ValueError, match="tiered_tp_atr_live_regime_dynamic"):
+        run_backtest.load_strategy_config(path, "hl-dyn-btc")
+
+
+def test_load_strategy_config_rejects_dynamic_regime_close_legacy_array(tmp_path):
+    path = _write_config(tmp_path, version=13, strategies=[
+        {
+            "id": "hl-dyn-btc",
+            "open_strategy": {"name": "tema_cross_bd"},
+            "close_strategies": [
+                {"name": "tiered_tp_atr_live_regime_dynamic", "params": {}},
+            ],
+        },
+    ])
+    with pytest.raises(ValueError, match="tiered_tp_atr_live_regime_dynamic"):
+        run_backtest.load_strategy_config(path, "hl-dyn-btc")
+
+
 def test_load_strategy_config_then_backtester_parity(tmp_path):
     """Same JSON block produces same Backtester wiring as constructing the
     refs by hand. This is the live↔backtest parity contract from the issue."""

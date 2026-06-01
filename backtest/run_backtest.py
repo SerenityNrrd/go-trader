@@ -122,16 +122,6 @@ def load_strategy_config(config_path: str, strategy_id: str) -> dict:
                 f"release (backtester parity deferred — see #779). Use the "
                 f"static `direction` / `invert_signal` fields for backtesting."
             )
-        close_single = sc.get("close_strategy") or {}
-        if (
-            isinstance(close_single, dict)
-            and close_single.get("name") == "tiered_tp_atr_live_regime_dynamic"
-        ):
-            raise ValueError(
-                f"{config_path}: strategy {strategy_id!r} uses "
-                f"tiered_tp_atr_live_regime_dynamic, which is HL-live-only "
-                f"in this release (backtester parity deferred — see #843)."
-            )
         # #842: a strategy has a single close_strategy ref. Still accept the
         # legacy close_strategies array (length <=1 after the collapse) so old
         # configs keep backtesting; the backtester's close_strategies= list
@@ -157,6 +147,13 @@ def load_strategy_config(config_path: str, strategy_id: str) -> dict:
             for ref in legacy:
                 if isinstance(ref, dict) and ref.get("name"):
                     close_refs.append({"name": ref["name"], "params": dict(ref.get("params") or {})})
+        for ref in close_refs:
+            if ref.get("name") == "tiered_tp_atr_live_regime_dynamic":
+                raise ValueError(
+                    f"{config_path}: strategy {strategy_id!r} uses "
+                    f"tiered_tp_atr_live_regime_dynamic, which is HL-live-only "
+                    f"in this release (backtester parity deferred — see #843)."
+                )
         return {
             "open_strategy": {
                 "name": open_ref["name"],

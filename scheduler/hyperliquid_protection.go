@@ -486,11 +486,12 @@ func runHyperliquidProtectionSync(
 	}
 	var plan hlProtectionPlan
 	var syncOK bool
-	var oldAppliedRegime string
-	mu.RLock()
-	if pos, ok := stratState.Positions[symbol]; ok {
-		if strategyUsesDynamicRegimeClose(sc) {
-			oldAppliedRegime = pos.RegimeAppliedLabel
+	if strategyUsesDynamicRegimeClose(sc) {
+		// Confirm-cycle state mutates Position fields — exclusive lock required
+		// (RLock would race /status JSON reads of RegimeAppliedLabel, etc.).
+		mu.Lock()
+		if pos, ok := stratState.Positions[symbol]; ok {
+			oldAppliedRegime := pos.RegimeAppliedLabel
 			regimeChanged := advanceDynamicCloseRegime(pos, stratState, sc)
 			plan, syncOK = buildHyperliquidProtectionPlan(sc, pos)
 			if syncOK && regimeChanged {
@@ -498,11 +499,15 @@ func runHyperliquidProtectionSync(
 				plan.ForceSLReplace = forceSL
 				plan.ForceTPReplace = forceTP
 			}
-		} else {
+		}
+		mu.Unlock()
+	} else {
+		mu.RLock()
+		if pos, ok := stratState.Positions[symbol]; ok {
 			plan, syncOK = buildHyperliquidProtectionPlan(sc, pos)
 		}
+		mu.RUnlock()
 	}
-	mu.RUnlock()
 	if !syncOK {
 		return false
 	}

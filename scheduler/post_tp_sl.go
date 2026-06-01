@@ -924,7 +924,7 @@ func slAfterLabelsForRegimeTiers(raw interface{}, labels []string) []string {
 func strategyUsesRegimeTieredTPATRClose(sc StrategyConfig) bool {
 	for _, ref := range sc.closeRefs() {
 		n := strings.ToLower(strings.TrimSpace(ref.Name))
-		if n == "tiered_tp_atr_regime" || n == "tiered_tp_atr_live_regime" {
+		if n == "tiered_tp_atr_regime" || n == "tiered_tp_atr_live_regime" || n == dynamicCloseStrategyName {
 			return true
 		}
 	}
@@ -1142,7 +1142,7 @@ func runPostTPStopLossAdjustment(
 	posRegime := protectionATRRegimeLabel(pos, sc)
 	mu.RUnlock()
 
-	if strategyUsesRegimeTieredTPATRClose(sc) || strategyUsesDynamicRegimeClose(sc) {
+	if strategyUsesRegimeTieredTPATRClose(sc) {
 		rules, _ = parseStrategyTPSLAfterRulesForRegime(sc, nil, posRegime)
 	}
 	rawRule := rules.ForTier(clearedIdx)
