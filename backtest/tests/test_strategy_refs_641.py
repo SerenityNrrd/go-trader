@@ -175,6 +175,25 @@ def test_load_strategy_config_reads_single_close_strategy(tmp_path):
     assert kwargs["close_strategies"][0]["params"]["tiers"][1]["atr_multiple"] == 3.0
 
 
+def test_load_strategy_config_rejects_multi_legacy_close_array(tmp_path):
+    # #842: the live Go loader rejects a len>1 close_strategies array; the
+    # backtester loader must reject it the same way instead of running it under
+    # the old max-fraction semantics (live↔backtest divergence).
+    path = _write_config(tmp_path, version=15, strategies=[
+        {
+            "id": "hl-temacb-btc",
+            "type": "perps",
+            "open_strategy": {"name": "tema_cross_bd"},
+            "close_strategies": [
+                {"name": "tiered_tp_atr"},
+                {"name": "tp_at_pct", "params": {"pct": 0.05}},
+            ],
+        },
+    ])
+    with pytest.raises(ValueError, match="collapsed to a single close_strategy"):
+        run_backtest.load_strategy_config(path, "hl-temacb-btc")
+
+
 def test_load_strategy_config_single_close_wins_over_legacy_array(tmp_path):
     # When both keys are present (defensive), the canonical close_strategy wins.
     path = _write_config(tmp_path, version=15, strategies=[

@@ -174,7 +174,18 @@ def _simulate_one(cfg: dict, candles: List[dict]) -> List[dict]:
     if isinstance(single_close, dict) and single_close.get("name"):
         close_refs = [dict(single_close)]
     else:
-        close_refs = [dict(r) for r in (cfg.get("close_strategies") or [])]
+        legacy = cfg.get("close_strategies") or []
+        # Match the live Go loader (#842): the array collapsed to a single
+        # close_strategy, so reject a len>1 legacy array instead of previewing
+        # it under the old max-fraction semantics the scheduler no longer runs.
+        if len(legacy) > 1:
+            raise ValueError(
+                f"{len(legacy)} close_strategies supplied; the array model was "
+                "collapsed to a single close_strategy (#842) — keep one "
+                "profit-taking close and move risk backstops to strategy-level "
+                "stop fields"
+            )
+        close_refs = [dict(r) for r in legacy]
     if close_refs:
         df_signals = ensure_atr_indicator(df_signals)
 

@@ -131,7 +131,20 @@ def load_strategy_config(config_path: str, strategy_id: str) -> dict:
         if isinstance(single, dict) and single.get("name"):
             close_refs.append({"name": single["name"], "params": dict(single.get("params") or {})})
         else:
-            for ref in sc.get("close_strategies", []) or []:
+            legacy = sc.get("close_strategies", []) or []
+            # Match the live Go loader: the array model collapsed to a single
+            # close_strategy (#842). A len>1 legacy array would run here under the
+            # old max-fraction semantics while the scheduler rejects it at load —
+            # reject the same way so backtest and live can't silently diverge.
+            if len(legacy) > 1:
+                raise ValueError(
+                    f"{config_path}: strategy {strategy_id!r} has "
+                    f"{len(legacy)} close_strategies; the array model was "
+                    f"collapsed to a single close_strategy (#842). Keep one "
+                    f"profit-taking close and move risk backstops to "
+                    f"strategy-level stop fields."
+                )
+            for ref in legacy:
                 if isinstance(ref, dict) and ref.get("name"):
                     close_refs.append({"name": ref["name"], "params": dict(ref.get("params") or {})})
         return {
