@@ -761,3 +761,54 @@ func TestTieredTPATRPricesForRegimeUsesFleetDefaults(t *testing.T) {
 		t.Errorf("empty regime should yield no TP prices, got %v", empty)
 	}
 }
+
+// TestStrategyTPTiersForRegime_UnifiedBlock verifies the #841 2b wiring: a
+// unified per-regime close ref resolves to the active regime's own scalar
+// ladder via select-then-scalar, and different regimes yield different ladders.
+func TestStrategyTPTiersForRegime_UnifiedBlock(t *testing.T) {
+	sc := StrategyConfig{
+		ID:       "hl-unified-eth",
+		Platform: "hyperliquid",
+		Type:     "perps",
+		CloseStrategies: []StrategyRef{{
+			Name: "tiered_tp_atr_live_regime",
+			Params: map[string]interface{}{
+				"atr_source": "live",
+				regimeClassifierKey: map[string]interface{}{
+					"trending_up": map[string]interface{}{
+						"stop_loss_atr": 1.5,
+						"tp_tiers": []interface{}{
+							map[string]interface{}{"atr_multiple": 2.0, "close_fraction": 0.5},
+							map[string]interface{}{"atr_multiple": 4.0, "close_fraction": 1.0},
+						},
+					},
+					"trending_down": map[string]interface{}{
+						"tp_tiers": []interface{}{
+							map[string]interface{}{"atr_multiple": 1.5, "close_fraction": 0.5},
+							map[string]interface{}{"atr_multiple": 3.0, "close_fraction": 1.0},
+						},
+					},
+					"ranging": map[string]interface{}{
+						"tp_tiers": []interface{}{
+							map[string]interface{}{"atr_multiple": 1.0, "close_fraction": 0.5},
+							map[string]interface{}{"atr_multiple": 2.0, "close_fraction": 1.0},
+						},
+					},
+				},
+			},
+		}},
+	}
+
+	up := strategyTPTiersForRegime(sc, "trending_up")
+	if len(up) != 2 || up[0].Multiple != 2.0 || up[1].Multiple != 4.0 {
+		t.Fatalf("trending_up tiers = %+v, want [2,4]", up)
+	}
+	rng := strategyTPTiersForRegime(sc, "ranging")
+	if len(rng) != 2 || rng[0].Multiple != 1.0 || rng[1].Multiple != 2.0 {
+		t.Fatalf("ranging tiers = %+v, want [1,2]", rng)
+	}
+	// Empty/unknown regime → no tiers this cycle (SL-only, retried next cycle).
+	if got := strategyTPTiersForRegime(sc, ""); got != nil {
+		t.Fatalf("empty regime tiers = %+v, want nil", got)
+	}
+}

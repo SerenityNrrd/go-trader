@@ -429,3 +429,41 @@ func TestValidateRegimeATRConfig_RejectsScalarRegimeMutex(t *testing.T) {
 		t.Fatalf("expected mutex error, got: %v", errs)
 	}
 }
+
+// TestParseRegimeATRBlock_AtrMultipleCanonical locks in the #841 canonical
+// trigger key: "atr_multiple" is accepted, the legacy "atr" alias still parses,
+// and setting both in one entry is rejected as ambiguous.
+func TestParseRegimeATRBlock_AtrMultipleCanonical(t *testing.T) {
+	mk := func(key string) map[string]interface{} {
+		return map[string]interface{}{
+			regimeClassifierKey: map[string]interface{}{
+				"trending_up":   map[string]interface{}{key: 2.0},
+				"trending_down": map[string]interface{}{key: 2.0},
+				"ranging":       map[string]interface{}{key: 1.5},
+			},
+		}
+	}
+
+	for _, key := range []string{"atr_multiple", "atr"} {
+		got, errs := parseRegimeATRBlock(mk(key), "stop_loss_atr_regime", regimeSurfaceStopLoss, canonicalTrendRegimeLabels)
+		if len(errs) > 0 {
+			t.Fatalf("key %q: unexpected errors: %v", key, errs)
+		}
+		if got.TrendRegime["trending_up"].ATR != 2.0 || got.TrendRegime["ranging"].ATR != 1.5 {
+			t.Fatalf("key %q: parsed wrong ATR values: %+v", key, got.TrendRegime)
+		}
+	}
+
+	// Both keys in one entry → ambiguous, rejected.
+	both := map[string]interface{}{
+		regimeClassifierKey: map[string]interface{}{
+			"trending_up":   map[string]interface{}{"atr_multiple": 2.0, "atr": 9.0},
+			"trending_down": map[string]interface{}{"atr_multiple": 2.0},
+			"ranging":       map[string]interface{}{"atr_multiple": 1.5},
+		},
+	}
+	_, errs := parseRegimeATRBlock(both, "stop_loss_atr_regime", regimeSurfaceStopLoss, canonicalTrendRegimeLabels)
+	if len(errs) == 0 {
+		t.Fatal("expected error when both atr_multiple and atr are set")
+	}
+}

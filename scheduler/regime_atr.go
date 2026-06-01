@@ -17,9 +17,9 @@ package main
 // Shape (explicit form):
 //
 //	{ "trend_regime": {
-//	    "trending_up":   { "atr": 2.0, "close_fraction": 0.5 },
-//	    "trending_down": { "atr": 2.0, "close_fraction": 0.5 },
-//	    "ranging":       { "atr": 1.5, "close_fraction": 0.5 }
+//	    "trending_up":   { "atr_multiple": 2.0, "close_fraction": 0.5 },
+//	    "trending_down": { "atr_multiple": 2.0, "close_fraction": 0.5 },
+//	    "ranging":       { "atr_multiple": 1.5, "close_fraction": 0.5 }
 //	  }
 //	}
 //
@@ -107,7 +107,7 @@ func (b RegimeATRBlock) MarshalJSON() ([]byte, error) {
 	}
 	out := map[string]map[string]map[string]interface{}{regimeClassifierKey: {}}
 	for label, entry := range b.TrendRegime {
-		e := map[string]interface{}{"atr": entry.ATR}
+		e := map[string]interface{}{"atr_multiple": entry.ATR}
 		if entry.HasCloseFrac {
 			e["close_fraction"] = entry.CloseFraction
 		}
@@ -433,7 +433,7 @@ func parseRegimeATRBlock(raw map[string]interface{}, ctxLabel string, surface re
 		}
 
 		allowFrac := surface == regimeSurfaceTPTierWithFrac
-		allowedEntryKeys := map[string]bool{"atr": true}
+		allowedEntryKeys := map[string]bool{"atr_multiple": true, "atr": true}
 		if allowFrac {
 			allowedEntryKeys["close_fraction"] = true
 		}
@@ -447,26 +447,30 @@ func parseRegimeATRBlock(raw map[string]interface{}, ctxLabel string, surface re
 		for _, k := range entryUnknown {
 			hint := ""
 			if k == "close_fraction" {
-				hint = " — close_fraction is only allowed inside close-evaluator tiers; for SL/trailing/sl_after surfaces, only atr is accepted"
+				hint = " — close_fraction is only allowed inside close-evaluator tiers; for SL/trailing/sl_after surfaces, only atr_multiple is accepted"
 			}
 			errs = append(errs, fmt.Sprintf("%s.%s.%s: unknown key %q%s", ctxLabel, regimeClassifierKey, label, k, hint))
 		}
 
-		atrRaw, hasATR := entryMap["atr"]
+		atrRaw, hasATR, atrErr := regimeEntryATRRaw(entryMap)
+		if atrErr != nil {
+			errs = append(errs, fmt.Sprintf("%s.%s.%s: %v", ctxLabel, regimeClassifierKey, label, atrErr))
+			continue
+		}
 		if !hasATR {
-			errs = append(errs, fmt.Sprintf("%s.%s.%s: missing required %q", ctxLabel, regimeClassifierKey, label, "atr"))
+			errs = append(errs, fmt.Sprintf("%s.%s.%s: missing required %q", ctxLabel, regimeClassifierKey, label, "atr_multiple"))
 			continue
 		}
 		atr, err := floatFromAnyChecked(atrRaw)
 		if err != nil {
-			errs = append(errs, fmt.Sprintf("%s.%s.%s.atr: %v", ctxLabel, regimeClassifierKey, label, err))
+			errs = append(errs, fmt.Sprintf("%s.%s.%s.atr_multiple: %v", ctxLabel, regimeClassifierKey, label, err))
 			continue
 		}
 		// sl_after atr_offset accepts signed atr (zero = breakeven, negative
 		// = SL behind entry). Every other surface requires a strictly
 		// positive magnitude. See #736.
 		if surface != regimeSurfaceSLAfter && atr <= 0 {
-			errs = append(errs, fmt.Sprintf("%s.%s.%s.atr: must be > 0, got %g", ctxLabel, regimeClassifierKey, label, atr))
+			errs = append(errs, fmt.Sprintf("%s.%s.%s.atr_multiple: must be > 0, got %g", ctxLabel, regimeClassifierKey, label, atr))
 			continue
 		}
 		entry := RegimeATREntry{ATR: atr}
@@ -489,6 +493,26 @@ func parseRegimeATRBlock(raw map[string]interface{}, ctxLabel string, surface re
 	}
 
 	return RegimeATRBlock{TrendRegime: result}, errs
+}
+
+// regimeEntryATRRaw reads the canonical "atr_multiple" trigger from a
+// per-regime entry, accepting the deprecated "atr" alias with a one-shot
+// warning. Setting both is rejected as ambiguous. Returns (raw, present, err).
+// #841.
+func regimeEntryATRRaw(entryMap map[string]interface{}) (interface{}, bool, error) {
+	canon, hasCanon := entryMap["atr_multiple"]
+	legacy, hasLegacy := entryMap["atr"]
+	switch {
+	case hasCanon && hasLegacy:
+		return nil, false, fmt.Errorf("set only one of %q or %q (%q is the deprecated alias)", "atr_multiple", "atr", "atr")
+	case hasCanon:
+		return canon, true, nil
+	case hasLegacy:
+		warnDeprecatedConfigKey("atr", "atr_multiple")
+		return legacy, true, nil
+	default:
+		return nil, false, nil
+	}
 }
 
 // resolveRegimeATR is the single resolution entry point used by all live and
@@ -790,11 +814,17 @@ func validateRegimeATRConfig(cfg *Config) []string {
 			}
 			usesRegime = true
 			subPrefix := fmt.Sprintf("%s.close_strategies[%d](%s)", prefix, j, ref.Name)
+			// #841 2b: unified per-regime block — validate the top-level
+			// trend_regime shape and skip the legacy tier-keyed checks.
+			if closeParamsAreUnifiedRegime(ref.Params) {
+				errs = append(errs, validateUnifiedRegimeClose(ref.Params, atrLabels, subPrefix)...)
+				continue
+			}
 			useDefaults := false
 			if v, ok := ref.Params["use_defaults"].(bool); ok {
 				useDefaults = v
 			}
-			tiersRaw, hasTiers := ref.Params["tiers"]
+			tiersRaw, hasTiers := closeTierListParam(ref.Params)
 			if useDefaults && hasTiers {
 				errs = append(errs, fmt.Sprintf("%s: cannot combine use_defaults:true with explicit tiers (use_defaults is all-or-nothing)", subPrefix))
 				continue
@@ -807,10 +837,10 @@ func validateRegimeATRConfig(cfg *Config) []string {
 			// atr_source, sl_after).
 			for k := range ref.Params {
 				switch k {
-				case "use_defaults", "tiers", "atr_source", "sl_after":
+				case "use_defaults", "tp_tiers", "tiers", "atr_source", "sl_after":
 					// known
 				default:
-					errs = append(errs, fmt.Sprintf("%s: unknown param %q (allowed: use_defaults, tiers, atr_source, sl_after)", subPrefix, k))
+					errs = append(errs, fmt.Sprintf("%s: unknown param %q (allowed: use_defaults, tp_tiers, atr_source, sl_after)", subPrefix, k))
 				}
 			}
 			if useDefaults {
@@ -826,6 +856,7 @@ func validateRegimeATRConfig(cfg *Config) []string {
 		if usesRegime && !regimeEnabled {
 			errs = append(errs, fmt.Sprintf("%s: regime-aware stop/TP fields require top-level regime.enabled=true", prefix))
 		}
+		errs = append(errs, validateUnifiedCloseSoleOwner(*sc, prefix)...)
 	}
 	return errs
 }

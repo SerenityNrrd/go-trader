@@ -142,3 +142,36 @@ def test_evaluate_missing_regime_noop(tiered_regime):
     result = tiered_regime.evaluate(position, market, {"use_defaults": True})
     assert result["close_fraction"] == 0.0
     assert "missing_position_regime" in result["reason"]
+
+
+def test_atr_multiple_canonical_and_legacy(regime_atr):
+    """#841: 'atr_multiple' is canonical, legacy 'atr' still parses, and setting
+    both in one entry is rejected."""
+    def mk(key):
+        return {
+            regime_atr.REGIME_CLASSIFIER_KEY: {
+                "trending_up": {key: 2.0},
+                "trending_down": {key: 2.0},
+                "ranging": {key: 1.5},
+            }
+        }
+
+    for key in ("atr_multiple", "atr"):
+        block, errs = regime_atr.parse_regime_atr_block(
+            mk(key), "stop_loss_atr_regime", regime_atr.SURFACE_STOP_LOSS
+        )
+        assert errs == [], f"key {key!r}: {errs}"
+        assert block.trend_regime["trending_up"].atr == 2.0
+        assert block.trend_regime["ranging"].atr == 1.5
+
+    both = {
+        regime_atr.REGIME_CLASSIFIER_KEY: {
+            "trending_up": {"atr_multiple": 2.0, "atr": 9.0},
+            "trending_down": {"atr_multiple": 2.0},
+            "ranging": {"atr_multiple": 1.5},
+        }
+    }
+    _, errs = regime_atr.parse_regime_atr_block(
+        both, "stop_loss_atr_regime", regime_atr.SURFACE_STOP_LOSS
+    )
+    assert errs, "expected error when both atr_multiple and atr are set"

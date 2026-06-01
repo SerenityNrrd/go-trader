@@ -9,6 +9,7 @@ The Go file is the source of truth for behavior; keep this in sync.
 
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -17,6 +18,67 @@ CANONICAL_TREND_REGIME_LABELS: Tuple[str, ...] = (
     "trending_down",
     "ranging",
 )
+
+_deprecated_keys_warned: set = set()
+
+
+def _warn_deprecated_key(old: str, canonical: str) -> None:
+    """One-shot stderr deprecation notice for a legacy regime-block key (#841)."""
+    if old in _deprecated_keys_warned:
+        return
+    _deprecated_keys_warned.add(old)
+    print(
+        f"[DEPRECATED] config key {old!r} is deprecated; use {canonical!r} (#841)",
+        file=sys.stderr,
+    )
+
+
+def _regime_entry_atr_raw(entry_raw: dict):
+    """Read the canonical 'atr_multiple' trigger from a per-regime entry,
+    accepting the deprecated 'atr' alias. Setting both is rejected (#841).
+    Returns (raw, present, error_msg)."""
+    has_canon = "atr_multiple" in entry_raw
+    has_legacy = "atr" in entry_raw
+    if has_canon and has_legacy:
+        return None, False, (
+            "set only one of 'atr_multiple' or 'atr' "
+            "('atr' is the deprecated alias)"
+        )
+    if has_canon:
+        return entry_raw.get("atr_multiple"), True, None
+    if has_legacy:
+        _warn_deprecated_key("atr", "atr_multiple")
+        return entry_raw.get("atr"), True, None
+    return None, False, None
+
+
+def close_params_are_unified_regime(params) -> bool:
+    """Report whether a close ref's params use the #841 unified per-regime block
+    (top-level ``trend_regime``) vs the legacy tier-keyed shape."""
+    return isinstance(params, dict) and REGIME_CLASSIFIER_KEY in params
+
+
+def unified_regime_scalar_params(params: dict, regime: str):
+    """Select the scalar tiered-close plan for ``regime`` from a unified block.
+    Returns (scalar_params, stop_loss_atr) where scalar_params is a plain scalar
+    tiered_tp_atr config ({"tp_tiers": [...], "atr_source": ...}), or (None, 0.0)
+    when the label is absent/malformed (caller falls back). Mirrors the Go
+    unifiedRegimeScalarParams. #841 2b."""
+    trend = params.get(REGIME_CLASSIFIER_KEY)
+    if not isinstance(trend, dict):
+        return None, 0.0
+    label = trend.get((regime or "").strip())
+    if not isinstance(label, dict) or "tp_tiers" not in label:
+        return None, 0.0
+    scalar = {"tp_tiers": label["tp_tiers"]}
+    if "atr_source" in params:
+        scalar["atr_source"] = params["atr_source"]
+    sl = 0.0
+    try:
+        sl = float(label.get("stop_loss_atr", 0) or 0)
+    except (TypeError, ValueError):
+        sl = 0.0
+    return scalar, sl
 
 REGIME_CLASSIFIER_KEY = "trend_regime"
 
@@ -197,7 +259,9 @@ def parse_regime_atr_block(
 
     result: Dict[str, RegimeATREntry] = {}
     allow_frac = surface == SURFACE_TP_TIER_WITH_FRAC
-    allowed_entry_keys = {"atr"} | ({"close_fraction"} if allow_frac else set())
+    allowed_entry_keys = {"atr_multiple", "atr"} | (
+        {"close_fraction"} if allow_frac else set()
+    )
 
     for label in labels:
         entry_raw = trend_raw.get(label)
@@ -218,23 +282,28 @@ def parse_regime_atr_block(
             if k == "close_fraction":
                 hint = (
                     " — close_fraction is only allowed inside close-evaluator tiers; "
-                    "for SL/trailing/sl_after surfaces, only atr is accepted"
+                    "for SL/trailing/sl_after surfaces, only atr_multiple is accepted"
                 )
             errs.append(
                 f"{ctx_label}.{REGIME_CLASSIFIER_KEY}.{label}: unknown key {k!r}{hint}"
             )
 
-        atr_raw = entry_raw.get("atr")
-        if atr_raw is None:
+        atr_raw, atr_present, atr_err = _regime_entry_atr_raw(entry_raw)
+        if atr_err:
             errs.append(
-                f"{ctx_label}.{REGIME_CLASSIFIER_KEY}.{label}: missing required 'atr'"
+                f"{ctx_label}.{REGIME_CLASSIFIER_KEY}.{label}: {atr_err}"
+            )
+            continue
+        if not atr_present:
+            errs.append(
+                f"{ctx_label}.{REGIME_CLASSIFIER_KEY}.{label}: missing required 'atr_multiple'"
             )
             continue
         try:
             atr = float(atr_raw)
         except (TypeError, ValueError):
             errs.append(
-                f"{ctx_label}.{REGIME_CLASSIFIER_KEY}.{label}.atr: expected number, "
+                f"{ctx_label}.{REGIME_CLASSIFIER_KEY}.{label}.atr_multiple: expected number, "
                 f"got {atr_raw!r}"
             )
             continue
@@ -243,7 +312,7 @@ def parse_regime_atr_block(
         # See #736.
         if surface != SURFACE_SL_AFTER and atr <= 0:
             errs.append(
-                f"{ctx_label}.{REGIME_CLASSIFIER_KEY}.{label}.atr: must be > 0, "
+                f"{ctx_label}.{REGIME_CLASSIFIER_KEY}.{label}.atr_multiple: must be > 0, "
                 f"got {atr}"
             )
             continue

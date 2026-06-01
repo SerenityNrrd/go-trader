@@ -38,7 +38,10 @@ func buildHyperliquidProtectionPlan(sc StrategyConfig, pos *Position) (hlProtect
 	// otherwise the regime-aware sibling resolves via pos.Regime. Validation
 	// ensures only one is set (#733).
 	slMult := 0.0
-	if sc.StopLossATRMult != nil && *sc.StopLossATRMult > 0 {
+	if v, ok := unifiedCloseStopLossATR(sc, positionATRRegimeLabel(pos, sc)); ok {
+		// #841 2b: unified close owns the per-regime SL.
+		slMult = v
+	} else if sc.StopLossATRMult != nil && *sc.StopLossATRMult > 0 {
 		slMult = *sc.StopLossATRMult
 	} else if sc.StopLossATRRegime != nil && !sc.StopLossATRRegime.IsZero() {
 		if v, ok := resolveRegimeATR(*sc.StopLossATRRegime, positionATRRegimeLabel(pos, sc)); ok {
@@ -101,7 +104,23 @@ func strategyTPTiersForRegime(sc StrategyConfig, regime string) []hlProtectionTi
 		if n == "tiered_tp_atr_regime" || n == "tiered_tp_atr_live_regime" {
 			regimeAware = true
 		}
-		if v, ok := ref.Params["tiers"]; ok {
+		// #841 2b: unified per-regime block — select the active regime's scalar
+		// ladder and resolve it through the scalar tier parser below. An unknown
+		// / empty regime yields no tiers this cycle (SL-only), retried next cycle
+		// once stampPositionRegimeIfOpened populates the label.
+		if regimeAware && closeParamsAreUnifiedRegime(ref.Params) {
+			scalar, _, ok := unifiedRegimeScalarParams(ref.Params, regime)
+			if !ok {
+				return nil
+			}
+			sel, _ := closeTierListParam(scalar)
+			tiers := parseHLProtectionTiers(sel)
+			if len(tiers) < 2 {
+				return nil
+			}
+			return finalizeProtectionTiers(tiers)
+		}
+		if v, ok := closeTierListParam(ref.Params); ok {
 			raw = v
 			break
 		}
