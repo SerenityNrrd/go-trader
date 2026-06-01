@@ -30,6 +30,11 @@ func formatProtectionSyncWarnings(result *HyperliquidProtectionSyncResult) []str
 			warns = append(warns, "TP2: "+result.TP2Error)
 		}
 	}
+	for _, oid := range result.TPCancelFailedOIDs {
+		if oid > 0 {
+			warns = append(warns, fmt.Sprintf("surplus TP cancel OID=%d failed (will retry)", oid))
+		}
+	}
 	return warns
 }
 

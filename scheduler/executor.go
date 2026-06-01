@@ -128,6 +128,10 @@ type HyperliquidProtectionSyncResult struct {
 	StopLossFilledExternally bool      `json:"stop_loss_filled_externally,omitempty"`
 	TP1FilledExternally      bool      `json:"tp1_filled_externally,omitempty"`
 	TP2FilledExternally      bool      `json:"tp2_filled_externally,omitempty"`
+	// #843: surplus tier-count-shrink cancels — failed OIDs are re-appended to
+	// pos.TPOIDs so the next cycle retries; filled OIDs are dropped from tracking.
+	TPCancelFailedOIDs []int64 `json:"tp_cancel_failed_oids,omitempty"`
+	TPCancelFilledOIDs []int64 `json:"tp_cancel_filled_oids,omitempty"`
 }
 
 // runPython is the shared subprocess spawner. parentCtx is one of

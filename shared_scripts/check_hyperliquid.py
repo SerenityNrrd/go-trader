@@ -495,8 +495,12 @@ def run_sync_protection(
     if side not in ("long", "short"):
         print(json.dumps({"error": f"invalid side {side!r}"}, cls=SafeEncoder))
         sys.exit(1)
-    if size <= 0 or avg_cost <= 0 or entry_atr <= 0:
-        print(json.dumps({"error": "size, avg-cost, and entry-atr must be > 0"}, cls=SafeEncoder))
+    if avg_cost <= 0 or entry_atr <= 0:
+        print(json.dumps({"error": "avg-cost and entry-atr must be > 0"}, cls=SafeEncoder))
+        sys.exit(1)
+    # Shared-coin dust can drive size to 0 while surplus TP OIDs still need cancel (#843).
+    if size <= 0 and not cancel_tp_oids:
+        print(json.dumps({"error": "size must be > 0"}, cls=SafeEncoder))
         sys.exit(1)
 
     out = {
@@ -555,6 +559,36 @@ def run_sync_protection(
             if fill.get("filled"):
                 return ("filled", fill)
             return ("place", None)
+
+        surplus_cancel_failed = []
+        surplus_cancel_filled = []
+        for surplus_oid in cancel_tp_oids or []:
+            oid = int(surplus_oid)
+            if oid <= 0:
+                continue
+            action, fill = _resolve_missing_oid(oid)
+            if action == "filled":
+                surplus_cancel_filled.append(oid)
+                print(
+                    f"[WARN] surplus TP OID={oid} already filled on-chain; not canceling — reconciler will book the close",
+                    file=sys.stderr,
+                )
+                continue
+            if action == "unknown":
+                surplus_cancel_failed.append(oid)
+                continue
+            try:
+                adapter.cancel_order_by_oid(symbol, oid)
+            except Exception as ce:
+                surplus_cancel_failed.append(oid)
+                print(
+                    f"[WARN] cancel surplus TP OID={oid} failed: {ce}",
+                    file=sys.stderr,
+                )
+        if surplus_cancel_failed:
+            out["tp_cancel_failed_oids"] = surplus_cancel_failed
+        if surplus_cancel_filled:
+            out["tp_cancel_filled_oids"] = surplus_cancel_filled
 
         if stop_loss_atr_mult > 0:
             if side == "long":
@@ -626,18 +660,6 @@ def run_sync_protection(
                     file=sys.stderr,
                 )
             else:
-                for surplus_oid in cancel_tp_oids or []:
-                    oid = int(surplus_oid)
-                    if oid <= 0:
-                        continue
-                    try:
-                        adapter.cancel_order_by_oid(symbol, oid)
-                    except Exception as ce:
-                        print(
-                            f"[WARN] cancel surplus TP OID={oid} failed: {ce}",
-                            file=sys.stderr,
-                        )
-
                 tp_oids_out = list(existing_tp_oids[:len(tiers)])
                 tp_pxs = []
                 tp_errors = [""] * len(tiers)

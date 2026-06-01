@@ -180,6 +180,33 @@ func TestApplyHyperliquidProtectionSyncStampsTPArmedTiers(t *testing.T) {
 	})
 }
 
+// #843: surplus tier-count-shrink cancel failures must stay in pos.TPOIDs for retry.
+func TestApplySurplusTPCancelRetention(t *testing.T) {
+	t.Run("re-appends failed surplus OID", func(t *testing.T) {
+		pos := &Position{Symbol: "ETH", TPOIDs: []int64{10, 20}, TPArmedTiers: []bool{true, true}}
+		applyHyperliquidProtectionSync(pos, &HyperliquidProtectionSyncResult{
+			TPOIDs:             []int64{10, 20},
+			TPCancelFailedOIDs: []int64{303},
+		})
+		if !reflect.DeepEqual(pos.TPOIDs, []int64{10, 20, 303}) {
+			t.Errorf("TPOIDs = %v, want [10 20 303]", pos.TPOIDs)
+		}
+		if len(pos.TPArmedTiers) != 3 || !pos.TPArmedTiers[2] {
+			t.Errorf("TPArmedTiers = %v, want third tier armed", pos.TPArmedTiers)
+		}
+	})
+
+	t.Run("does not duplicate OID already present", func(t *testing.T) {
+		pos := &Position{Symbol: "ETH", TPOIDs: []int64{10, 20, 303}}
+		applySurplusTPCancelRetention(pos, &HyperliquidProtectionSyncResult{
+			TPCancelFailedOIDs: []int64{303},
+		})
+		if !reflect.DeepEqual(pos.TPOIDs, []int64{10, 20, 303}) {
+			t.Errorf("TPOIDs = %v, want unchanged [10 20 303]", pos.TPOIDs)
+		}
+	})
+}
+
 // #842: the close array collapsed to a single close ref. On HL live, a tiered
 // ATR close that also places on-chain TPs is dropped from the Python check
 // (the ladder is placed on-chain); non-tiered or paper closes are kept.

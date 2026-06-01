@@ -458,6 +458,38 @@ func applyHyperliquidProtectionSync(pos *Position, result *HyperliquidProtection
 			pos.TPArmedTiers[1] = true
 		}
 	}
+	applySurplusTPCancelRetention(pos, result)
+}
+
+// applySurplusTPCancelRetention re-appends surplus TP OIDs whose on-chain cancel
+// failed or was deferred so Go state does not forget still-resting orphans (#843).
+func applySurplusTPCancelRetention(pos *Position, result *HyperliquidProtectionSyncResult) {
+	if pos == nil || result == nil || len(result.TPCancelFailedOIDs) == 0 {
+		return
+	}
+	for _, oid := range result.TPCancelFailedOIDs {
+		if oid <= 0 {
+			continue
+		}
+		found := false
+		for _, existing := range pos.TPOIDs {
+			if existing == oid {
+				found = true
+				break
+			}
+		}
+		if found {
+			continue
+		}
+		pos.TPOIDs = append(pos.TPOIDs, oid)
+		if len(pos.TPArmedTiers) < len(pos.TPOIDs) {
+			extended := make([]bool, len(pos.TPOIDs))
+			copy(extended, pos.TPArmedTiers)
+			pos.TPArmedTiers = extended
+		}
+		// Surplus slots were resting before the tier-count shrink.
+		pos.TPArmedTiers[len(pos.TPOIDs)-1] = true
+	}
 }
 
 // runHyperliquidProtectionSync is the locking + plan + subprocess + apply

@@ -662,6 +662,7 @@ class TestSyncProtection:
         fill_lookup_by_oid=None,
         place_responses=None,
         reconcile_fill_hints_json=None,
+        cancel_tp_oids=None,
     ):
         mod, spec = _load_check_module()
         spec.loader.exec_module(mod)
@@ -734,8 +735,70 @@ class TestSyncProtection:
                     tp_oids=tp_oids,
                     tp_armed_tiers=tp_armed_tiers,
                     reconcile_fill_hints_json=reconcile_fill_hints_json or "",
+                    cancel_tp_oids=cancel_tp_oids,
                 )
         return json.loads(captured.getvalue()), mock_adapter
+
+    def test_surplus_cancel_failed_reported(self):
+        """#843: failed surplus cancel surfaces OID for Go retry; runs even when size=0."""
+        mod, spec = _load_check_module()
+        spec.loader.exec_module(mod)
+        mock_adapter_cls = MagicMock()
+        mock_adapter = MagicMock()
+        mock_adapter_cls.return_value = mock_adapter
+        mock_adapter.open_order_oids.return_value = {303}
+        mock_adapter.round_perps_trigger_px.side_effect = lambda _sym, px: round(px, 4)
+        mock_adapter.round_size.side_effect = lambda _sym, sz: round(sz, 3)
+        mock_adapter.floor_size.side_effect = lambda _sym, sz: math.floor(sz * 1000) / 1000
+        mock_adapter.lookup_fill_fee_by_oid.return_value = {}
+        mock_adapter.cancel_order_by_oid.side_effect = Exception("rpc down")
+        captured = StringIO()
+        import builtins
+        original_import = builtins.__import__
+
+        def mock_import(name, *args, **kwargs):
+            if name == "adapter":
+                fake_mod = MagicMock()
+                fake_mod.HyperliquidExchangeAdapter = mock_adapter_cls
+                return fake_mod
+            return original_import(name, *args, **kwargs)
+
+        with patch("builtins.__import__", side_effect=mock_import):
+            with patch("sys.stdout", captured):
+                mod.run_sync_protection(
+                    "ETH",
+                    "long",
+                    0,
+                    2000.0,
+                    20.0,
+                    "live",
+                    stop_loss_atr_mult=0,
+                    cancel_tp_oids=[303],
+                )
+        out = json.loads(captured.getvalue())
+        assert out.get("tp_cancel_failed_oids") == [303]
+        mock_adapter.cancel_order_by_oid.assert_called_once_with("ETH", 303)
+
+    def test_surplus_cancel_filled_skips_cancel(self):
+        """#843: surplus OID already filled → report filled, do not cancel."""
+        out, adapter = self._run_sync(
+            cancel_tp_oids=[303],
+            open_oids=set(),
+            fill_lookup_by_oid={303: {"fee": 0.05, "closed_pnl": 25.0, "count": 1}},
+        )
+        assert out.get("tp_cancel_filled_oids") == [303]
+        assert not out.get("tp_cancel_failed_oids")
+        adapter.cancel_order_by_oid.assert_not_called()
+
+    def test_surplus_cancel_runs_when_size_zero(self):
+        """#843: tier placement skipped for dust but surplus cancel still runs."""
+        out, adapter = self._run_sync(
+            size=0,
+            tp_tiers=[(1.0, 0.5), (2.0, 1.0)],
+            cancel_tp_oids=[303],
+            open_oids={303},
+        )
+        adapter.cancel_order_by_oid.assert_called_once_with("ETH", 303)
 
     def test_existing_oid_still_open_returns_same_oid(self):
         """OID still in open_orders → echo it back, do NOT call place_take_profit_limit."""
