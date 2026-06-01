@@ -18,17 +18,21 @@ func unifiedBlock() map[string]interface{} {
 					map[string]interface{}{"atr_multiple": 4.0, "close_fraction": 1.0},
 				},
 			},
-			// Different tier count per regime is allowed under select-then-scalar.
+			// Different tier count per regime is allowed under select-then-scalar
+			// (>=2 required to match the on-chain resolver): 3 tiers here vs 2.
 			"trending_down": map[string]interface{}{
 				"stop_loss_atr": 1.0,
 				"tp_tiers": []interface{}{
-					map[string]interface{}{"atr_multiple": 1.5, "close_fraction": 1.0},
+					map[string]interface{}{"atr_multiple": 1.5, "close_fraction": 0.4},
+					map[string]interface{}{"atr_multiple": 2.5, "close_fraction": 0.7},
+					map[string]interface{}{"atr_multiple": 3.5, "close_fraction": 1.0},
 				},
 			},
 			"ranging": map[string]interface{}{
 				"stop_loss_atr": 0.8,
 				"tp_tiers": []interface{}{
 					map[string]interface{}{"atr_multiple": 1.0, "close_fraction": 0.5},
+					map[string]interface{}{"atr_multiple": 2.0, "close_fraction": 1.0},
 				},
 			},
 		},
@@ -64,13 +68,13 @@ func TestUnifiedRegimeScalarParams(t *testing.T) {
 		t.Fatalf("tp_tiers = %v, want 2-tier list", scalar["tp_tiers"])
 	}
 
-	// Variable tier count: trending_down has a single tier.
+	// Variable tier count: trending_down has 3 tiers vs trending_up's 2.
 	scalarDown, _, ok := unifiedRegimeScalarParams(unifiedBlock(), "trending_down")
 	if !ok {
 		t.Fatal("expected ok for trending_down")
 	}
-	if td := scalarDown["tp_tiers"].([]interface{}); len(td) != 1 {
-		t.Fatalf("trending_down tp_tiers len = %d, want 1", len(td))
+	if td := scalarDown["tp_tiers"].([]interface{}); len(td) != 3 {
+		t.Fatalf("trending_down tp_tiers len = %d, want 3", len(td))
 	}
 
 	// Unknown label → miss (caller falls back).
@@ -108,6 +112,13 @@ func TestValidateUnifiedRegimeClose_Errors(t *testing.T) {
 		{"bad stop_loss_atr", func(m map[string]interface{}) {
 			m[regimeClassifierKey].(map[string]interface{})["ranging"].(map[string]interface{})["stop_loss_atr"] = -1.0
 		}, "stop_loss_atr: must be > 0"},
+		{"missing stop_loss_atr", func(m map[string]interface{}) {
+			delete(m[regimeClassifierKey].(map[string]interface{})["ranging"].(map[string]interface{}), "stop_loss_atr")
+		}, "missing required \"stop_loss_atr\""},
+		{"single tier rejected", func(m map[string]interface{}) {
+			rng := m[regimeClassifierKey].(map[string]interface{})["ranging"].(map[string]interface{})
+			rng["tp_tiers"] = []interface{}{map[string]interface{}{"atr_multiple": 1.0, "close_fraction": 1.0}}
+		}, "must have at least 2 tiers"},
 		{"regime-keyed sl_after rejected", func(m map[string]interface{}) {
 			tier := m[regimeClassifierKey].(map[string]interface{})["ranging"].(map[string]interface{})["tp_tiers"].([]interface{})[0].(map[string]interface{})
 			tier["sl_after"] = map[string]interface{}{"kind": "trail_from_here",
@@ -139,6 +150,7 @@ func TestUnifiedRegimeScalarParams_ShapeMatchesScalarConfig(t *testing.T) {
 		"atr_source": "live",
 		"tp_tiers": []interface{}{
 			map[string]interface{}{"atr_multiple": 1.0, "close_fraction": 0.5},
+			map[string]interface{}{"atr_multiple": 2.0, "close_fraction": 1.0},
 		},
 	}
 	if !reflect.DeepEqual(scalar, want) {

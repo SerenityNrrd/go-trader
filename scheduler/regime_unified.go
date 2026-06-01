@@ -218,10 +218,14 @@ func validateUnifiedRegimeClose(params map[string]interface{}, labels []string, 
 					ctxLabel, regimeClassifierKey, l, k))
 			}
 		}
-		if v, ok := lm["stop_loss_atr"]; ok {
-			if f, err := floatFromAnyChecked(v); err != nil || f <= 0 {
-				errs = append(errs, fmt.Sprintf("%s.%s.%s.stop_loss_atr: must be > 0", ctxLabel, regimeClassifierKey, l))
-			}
+		// stop_loss_atr is required per label: the unified close owns the SL
+		// (EffectiveStopLossPct defers and sole-owner rejects strategy-level
+		// stops), so a regime omitting it would run an HL perps position with no
+		// stop loss at all. #841 review.
+		if v, ok := lm["stop_loss_atr"]; !ok {
+			errs = append(errs, fmt.Sprintf("%s.%s.%s: missing required %q (the unified close owns the per-regime SL)", ctxLabel, regimeClassifierKey, l, "stop_loss_atr"))
+		} else if f, err := floatFromAnyChecked(v); err != nil || f <= 0 {
+			errs = append(errs, fmt.Sprintf("%s.%s.%s.stop_loss_atr: must be > 0", ctxLabel, regimeClassifierKey, l))
 		}
 		tiersRaw, ok := lm["tp_tiers"]
 		if !ok {
@@ -241,8 +245,12 @@ func validateUnifiedTierList(raw interface{}, ctxLabel string) []string {
 	if !ok {
 		return []string{fmt.Sprintf("%s.tp_tiers: must be a list, got %T", ctxLabel, raw)}
 	}
-	if len(items) == 0 {
-		return []string{fmt.Sprintf("%s.tp_tiers: must have at least one tier", ctxLabel)}
+	// Require >=2 tiers to match the on-chain resolver (strategyTPTiersForRegime
+	// returns nil for <2) and the legacy regime validator. On HL-live the
+	// software evaluator is suppressed, so a single-tier regime would emit no TP
+	// exit at all — only the SL. A single TP-then-trail belongs in #844. #841 review.
+	if len(items) < 2 {
+		return []string{fmt.Sprintf("%s.tp_tiers: must have at least 2 tiers, got %d", ctxLabel, len(items))}
 	}
 	var errs []string
 	for i, item := range items {
