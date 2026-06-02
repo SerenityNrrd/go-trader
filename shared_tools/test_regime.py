@@ -381,12 +381,47 @@ def test_parse_regime_windows_json_rejects_reserved_name():
 
 
 def test_map_composite_label_states():
-    th = {"return_pct": 0.05, "range_pct": 0.03, "adx": 25}
-    assert _regime_mod.map_composite_label(0.10, 30, 0.10, th) == "trending_up_clean"
-    assert _regime_mod.map_composite_label(0.10, 10, 0.10, th) == "trending_up_choppy"
-    assert _regime_mod.map_composite_label(-0.10, 30, 0.10, th) == "trending_down_clean"
-    assert _regime_mod.map_composite_label(0.01, 10, 0.01, th) == "ranging_quiet"
-    assert _regime_mod.map_composite_label(0.01, 30, 0.10, th) == "ranging_directional"
+    th = {"return_pct": 0.05, "range_pct": 0.03, "adx": 25, "efficiency": 0.5}
+    m = _regime_mod.map_composite_label
+    # (return_eff, adx, range_eff, efficiency, thresholds)
+    # Clean trend: big net move + high efficiency + high ADX.
+    assert m(0.10, 30, 0.10, 0.7, th) == "trending_up_clean"
+    # Choppy trend: big net move but ADX too low to confirm clean.
+    assert m(0.10, 10, 0.10, 0.7, th) == "trending_up_choppy"
+    # Choppy trend: big net move, high ADX, but low efficiency (lots of churn).
+    assert m(0.10, 30, 0.10, 0.2, th) == "trending_up_choppy"
+    assert m(-0.10, 30, 0.10, 0.7, th) == "trending_down_clean"
+    assert m(-0.10, 10, 0.10, 0.7, th) == "trending_down_choppy"
+    # Ranging family: no decisive net move.
+    assert m(0.01, 10, 0.01, 0.0, th) == "ranging_quiet"
+    assert m(0.01, 10, 0.10, 0.0, th) == "ranging_volatile"
+    assert m(0.01, 30, 0.10, 0.0, th) == "ranging_directional"
+
+
+def test_latest_regime_composite_ranging_not_trending():
+    """Regression: a mean-reverting market must not be labeled trending.
+
+    Pre-fix the metric divided whole-window numerators by a single-bar ATR, so
+    `big_move`/`wide` were always true and ranging labels were unreachable.
+    """
+    import numpy as np
+
+    n = 200
+    period = 50
+    idx = pd.date_range("2024-01-01", periods=n, freq="h")
+    rng = np.random.default_rng(0)
+    prices = 100 + 2 * np.sin(np.linspace(0, 8 * np.pi, n)) + rng.normal(0, 0.3, n)
+    df = pd.DataFrame(
+        {
+            "open": prices,
+            "high": prices * 1.003,
+            "low": prices * 0.997,
+            "close": prices,
+        },
+        index=idx,
+    )
+    snap = _regime_mod.latest_regime_composite(df, period=period)
+    assert snap["regime"].startswith("ranging"), snap
 
 
 def test_parse_regime_windows_spec_json_composite():

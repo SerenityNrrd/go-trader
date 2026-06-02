@@ -14,16 +14,20 @@ const (
 
 // Default composite thresholds (#795); operators may override per window.
 var defaultCompositeThresholds = RegimeCompositeThresholds{
-	ReturnPct: 0.05,
-	RangePct:  0.03,
-	ADX:       25.0,
+	ReturnPct:  0.05,
+	RangePct:   0.03,
+	ADX:        25.0,
+	Efficiency: 0.5,
 }
 
-// RegimeCompositeThresholds tunes the 3-tuple mapper for classifier=composite.
+// RegimeCompositeThresholds tunes the composite metric mapper. ReturnPct/RangePct
+// gate the ATR-efficiency net-move/range; Efficiency is the Kaufman efficiency
+// ratio (∈ (0,1]) that splits clean vs choppy trends; ADX corroborates.
 type RegimeCompositeThresholds struct {
-	ReturnPct float64 `json:"return_pct"`
-	RangePct  float64 `json:"range_pct"`
-	ADX       float64 `json:"adx"`
+	ReturnPct  float64 `json:"return_pct"`
+	RangePct   float64 `json:"range_pct"`
+	ADX        float64 `json:"adx"`
+	Efficiency float64 `json:"efficiency"`
 }
 
 func (t RegimeCompositeThresholds) withDefaults() RegimeCompositeThresholds {
@@ -36,6 +40,9 @@ func (t RegimeCompositeThresholds) withDefaults() RegimeCompositeThresholds {
 	}
 	if t.ADX > 0 {
 		out.ADX = t.ADX
+	}
+	if t.Efficiency > 0 {
+		out.Efficiency = t.Efficiency
 	}
 	return out
 }
@@ -179,6 +186,9 @@ func validateRegimeWindowSpec(name string, spec RegimeWindowSpec, rc *RegimeConf
 		if th.ADX <= 0 || th.ADX > 100 {
 			errs = append(errs, fmt.Sprintf("%s: thresholds.adx must be in (0, 100], got %g", prefix, th.ADX))
 		}
+		if th.Efficiency <= 0 || th.Efficiency > 1 {
+			errs = append(errs, fmt.Sprintf("%s: thresholds.efficiency must be in (0, 1], got %g", prefix, th.Efficiency))
+		}
 	default:
 		errs = append(errs, fmt.Sprintf("%s: classifier must be %q or %q, got %q", prefix, regimeClassifierADX, regimeClassifierComposite, spec.Classifier))
 	}
@@ -306,8 +316,8 @@ func formatRegimeWindowSpecInspect(name string, spec RegimeWindowSpec, rc *Regim
 	cls := resolved.effectiveClassifier()
 	if cls == regimeClassifierComposite && resolved.Thresholds != nil {
 		th := resolved.Thresholds
-		return fmt.Sprintf("%s: classifier=%s period=%d thresholds(return_pct=%g range_pct=%g adx=%g)",
-			name, cls, resolved.Period, th.ReturnPct, th.RangePct, th.ADX)
+		return fmt.Sprintf("%s: classifier=%s period=%d thresholds(return_pct=%g range_pct=%g adx=%g efficiency=%g)",
+			name, cls, resolved.Period, th.ReturnPct, th.RangePct, th.ADX, th.Efficiency)
 	}
 	return fmt.Sprintf("%s: classifier=%s period=%d adx_threshold=%g", name, cls, resolved.Period, resolved.ADXThreshold)
 }
