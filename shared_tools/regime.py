@@ -64,6 +64,7 @@ _DEFAULT_COMPOSITE_THRESHOLDS = {
     "return_pct": 0.05,
     "range_pct": 0.03,
     "adx": 25.0,
+    "efficiency": 0.5,
 }
 
 _REGIME_COLUMNS = ("regime", "regime_score", "adx", "plus_di", "minus_di")
@@ -112,37 +113,66 @@ def _atr_at_end(df: pd.DataFrame, period: int) -> float:
     return atr_val if atr_val > 0 else 0.0
 
 
+def _composite_efficiency_metrics(window: pd.DataFrame, atr_val: float, period: int) -> dict:
+    """ATR-efficiency metrics for one window (shared by live + backtest paths).
+
+    `atr_val` is the per-bar ATR; the window spans `period` bars, so the
+    straight-line ATR travel denominator is atr_val * period.
+    """
+    denom = atr_val * period
+    close_end = float(window["close"].iloc[-1])
+    close_start = float(window["close"].iloc[0])
+    net = close_end - close_start
+    hi = float(window["high"].max())
+    lo = float(window["low"].min())
+    # Kaufman efficiency ratio: net travel / summed bar-to-bar travel ∈ [0, 1].
+    path = float(window["close"].diff().abs().sum())
+    return {
+        "return_eff": net / denom if denom > 0 else 0.0,
+        "range_eff": (hi - lo) / denom if denom > 0 else 0.0,
+        "efficiency": abs(net) / path if path > 0 else 0.0,
+        "close_end": close_end,
+    }
+
+
 def map_composite_label(
-    return_atr_norm: float,
+    return_eff: float,
     adx_val: float,
-    range_atr_norm: float,
+    range_eff: float,
+    efficiency: float,
     thresholds: dict[str, float],
 ) -> str:
-    """Map the 3-tuple to one of seven composite labels (#795)."""
+    """Map the composite metric tuple to one of seven labels (#795).
+
+    Inputs are ATR-efficiency normalized so the thresholds are unit-consistent:
+      return_eff — window net move / (per-bar ATR * period), signed, ~[-1, 1]
+      range_eff  — window high-low / (per-bar ATR * period), ~[0, 1]
+      efficiency — Kaufman efficiency ratio |net move| / summed bar-to-bar
+                   travel, ∈ [0, 1]; high = clean directional move, low = chop.
+    `adx_val` corroborates the efficiency-based clean/choppy split.
+    """
     ret_th = float(thresholds.get("return_pct", _DEFAULT_COMPOSITE_THRESHOLDS["return_pct"]))
     range_th = float(thresholds.get("range_pct", _DEFAULT_COMPOSITE_THRESHOLDS["range_pct"]))
     adx_th = float(thresholds.get("adx", _DEFAULT_COMPOSITE_THRESHOLDS["adx"]))
+    eff_th = float(thresholds.get("efficiency", _DEFAULT_COMPOSITE_THRESHOLDS["efficiency"]))
 
-    big_move = abs(return_atr_norm) >= ret_th
-    up = return_atr_norm > 0
+    big_move = abs(return_eff) >= ret_th
+    up = return_eff > 0
     high_adx = adx_val >= adx_th
-    wide = range_atr_norm >= range_th
+    wide = range_eff >= range_th
+    clean = efficiency >= eff_th and high_adx
 
-    if big_move and up:
-        if high_adx and wide:
-            return "trending_up_clean"
-        return "trending_up_choppy"
-    if big_move and not up:
-        if high_adx and wide:
-            return "trending_down_clean"
-        return "trending_down_choppy"
-    if not big_move:
-        if high_adx and wide:
-            return "ranging_directional"
-        if wide:
-            return "ranging_volatile"
-        return "ranging_quiet"
-    return "ranging_volatile"
+    if big_move:
+        if up:
+            return "trending_up_clean" if clean else "trending_up_choppy"
+        return "trending_down_clean" if clean else "trending_down_choppy"
+    # No decisive net move → ranging family.
+    if high_adx:
+        # Directional pressure without net follow-through.
+        return "ranging_directional"
+    if wide:
+        return "ranging_volatile"
+    return "ranging_quiet"
 
 
 def latest_regime_composite(
@@ -155,7 +185,8 @@ def latest_regime_composite(
         return {**_DEFAULT_RESULT, "metrics": dict(_DEFAULT_METRICS), "classifier": CLASSIFIER_COMPOSITE}
 
     window = _window_slice(df, period)
-    # Return/range numerators span the full window; ATR denominator matches that horizon.
+    # Numerators span the full window; ATR-efficiency divides by the window's
+    # straight-line ATR travel (per-bar ATR * period) so thresholds are unit-consistent.
     atr_val = _atr_at_end(df, period)
     if atr_val <= 0:
         return {
@@ -165,28 +196,24 @@ def latest_regime_composite(
             "metrics": dict(_DEFAULT_METRICS),
         }
 
-    close_end = float(window["close"].iloc[-1])
-    close_start = float(window["close"].iloc[0])
-    return_atr_norm = (close_end - close_start) / atr_val
-
-    hi = float(window["high"].max())
-    lo = float(window["low"].min())
-    range_atr_norm = (hi - lo) / atr_val
+    eff = _composite_efficiency_metrics(window, atr_val, period)
 
     adx_period = min(period, COMPOSITE_ADX_PERIOD_CAP)
     reg_df = compute_regime(df, period=adx_period, adx_threshold=th["adx"])
     adx_val = float(reg_df["adx"].iloc[-1]) if len(reg_df) else 0.0
 
-    label = map_composite_label(return_atr_norm, adx_val, range_atr_norm, th)
+    label = map_composite_label(eff["return_eff"], adx_val, eff["range_eff"], eff["efficiency"], th)
     score = min(adx_val / 100.0, 1.0)
+    close_end = eff["close_end"]
     return {
         "regime": label,
         "score": score,
         "classifier": CLASSIFIER_COMPOSITE,
         "metrics": {
             "adx": adx_val,
-            "return_atr_norm": round(return_atr_norm, 4),
-            "range_atr_norm": round(range_atr_norm, 4),
+            "return_eff": round(eff["return_eff"], 4),
+            "range_eff": round(eff["range_eff"], 4),
+            "efficiency": round(eff["efficiency"], 4),
             "atr_pct": round(atr_val / close_end * 100.0, 4) if close_end else 0.0,
         },
     }
@@ -292,14 +319,9 @@ def compute_regime_composite(
         atr_val = float(atr_series.iloc[i]) if i < len(atr_series) else 0.0
         if not (atr_val > 0):
             continue
-        close_end = float(window["close"].iloc[-1])
-        close_start = float(window["close"].iloc[0])
-        return_atr_norm = (close_end - close_start) / atr_val
-        hi = float(window["high"].max())
-        lo = float(window["low"].min())
-        range_atr_norm = (hi - lo) / atr_val
+        eff = _composite_efficiency_metrics(window, atr_val, period)
         adx_val = float(result["adx"].iloc[i])
-        label = map_composite_label(return_atr_norm, adx_val, range_atr_norm, th)
+        label = map_composite_label(eff["return_eff"], adx_val, eff["range_eff"], eff["efficiency"], th)
         result.iat[i, result.columns.get_loc("regime")] = label
         result.iat[i, result.columns.get_loc("regime_score")] = min(adx_val / 100.0, 1.0)
     return result
