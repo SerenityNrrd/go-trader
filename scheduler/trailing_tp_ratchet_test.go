@@ -357,6 +357,83 @@ func TestValidateTrailingTPRatchetClose_RejectsFixedStopLossOwners(t *testing.T)
 	}
 }
 
+func TestValidateTrailingTPRatchetClose_RejectsFirstRungLooserThanInitial(t *testing.T) {
+	trail := 1.0
+	sc := StrategyConfig{
+		ID: "s1", Type: "perps", Platform: "hyperliquid",
+		TrailingStopATRMult: &trail,
+		CloseStrategy: &StrategyRef{
+			Name: "trailing_tp_ratchet",
+			Params: map[string]interface{}{
+				"tp_tiers": []interface{}{
+					// First rung trail (2.0×) is LOOSER than the initial 1.0× trail —
+					// it would silently no-op at runtime, so reject at load.
+					map[string]interface{}{
+						"atr_multiple": 1.0, "close_fraction": 0.0, "trailing_mult_after": 2.0,
+					},
+				},
+			},
+		},
+	}
+	errs := validateTrailingTPRatchetClose(sc, canonicalTrendRegimeLabels, true)
+	if !errListContains(errs, "can only tighten") {
+		t.Fatalf("expected first-rung-looser-than-initial validation error, got: %v", errs)
+	}
+}
+
+// TestValidateTrailingTPRatchetClose_CompositeVocabulary proves the regime form
+// validates cleanly against the 7-state composite classifier when the strategy's
+// regime_atr_window opts into it (and rejects an ADX-only label under composite).
+func TestValidateTrailingTPRatchetClose_CompositeVocabulary(t *testing.T) {
+	tierList := []interface{}{
+		map[string]interface{}{
+			"atr_multiple": 1.0, "close_fraction": 0.0, "trailing_mult_after": 1.0,
+		},
+	}
+	compositeTable := func(labels []string) map[string]interface{} {
+		tbl := make(map[string]interface{}, len(labels))
+		for _, l := range labels {
+			tbl[l] = tierList
+		}
+		return tbl
+	}
+	composite := regimeLabelsForClassifier(regimeClassifierComposite)
+	if len(composite) != 7 {
+		t.Fatalf("expected 7 composite labels, got %d", len(composite))
+	}
+
+	trail := 3.0
+	scOK := StrategyConfig{
+		ID: "hl-comp", Type: "perps", Platform: "hyperliquid",
+		RegimeATRWindow:     "daily",
+		TrailingStopATRMult: &trail,
+		CloseStrategy: &StrategyRef{
+			Name:   "trailing_tp_ratchet_regime",
+			Params: map[string]interface{}{"tp_tiers": compositeTable(composite)},
+		},
+	}
+	if errs := validateRegimeATRConfig(compositeRegimeCfg(scOK)); len(errs) != 0 {
+		t.Fatalf("composite trailing_tp_ratchet_regime must validate, got: %v", errs)
+	}
+
+	// A 3-state ADX label under a composite window must be rejected.
+	bad := compositeTable(composite)
+	bad["ranging"] = tierList // not a composite label
+	trail2 := 3.0
+	scBad := StrategyConfig{
+		ID: "hl-comp-bad", Type: "perps", Platform: "hyperliquid",
+		RegimeATRWindow:     "daily",
+		TrailingStopATRMult: &trail2,
+		CloseStrategy: &StrategyRef{
+			Name:   "trailing_tp_ratchet_regime",
+			Params: map[string]interface{}{"tp_tiers": bad},
+		},
+	}
+	if errs := validateRegimeATRConfig(compositeRegimeCfg(scBad)); !errListContains(errs, "unknown regime key") {
+		t.Fatalf("expected unknown-regime-key error for ADX label under composite window, got: %v", errs)
+	}
+}
+
 func errListContains(errs []string, needle string) bool {
 	for _, err := range errs {
 		if strings.Contains(err, needle) {

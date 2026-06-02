@@ -195,6 +195,10 @@ func validateTrailingTPRatchetClose(sc StrategyConfig, labels []string, regimeEn
 	if sc.StopLossATRRegime.IsConfigured() {
 		errs = append(errs, fmt.Sprintf("%s: trailing_tp_ratchet* cannot combine with stop_loss_atr_regime", prefix))
 	}
+	initialTrail := 0.0
+	if sc.TrailingStopATRMult != nil {
+		initialTrail = *sc.TrailingStopATRMult
+	}
 	for _, ref := range sc.closeRefs() {
 		if !isTrailingTPRatchetCloseName(ref.Name) {
 			continue
@@ -242,6 +246,7 @@ func validateTrailingTPRatchetClose(sc StrategyConfig, labels []string, regimeEn
 				tiers, subErrs := parseTrailingRatchetTierList(block, sub+".tp_tiers."+key)
 				errs = append(errs, subErrs...)
 				errs = append(errs, validateTrailingRatchetTierMonotonicity(tiers, sub+".tp_tiers."+key)...)
+				errs = append(errs, validateTrailingRatchetInitialTrail(tiers, initialTrail, sub+".tp_tiers."+key)...)
 			}
 			continue
 		}
@@ -257,13 +262,35 @@ func validateTrailingTPRatchetClose(sc StrategyConfig, labels []string, regimeEn
 			tiers, subErrs := parseTrailingRatchetTierList(block, sub+".tp_tiers")
 			errs = append(errs, subErrs...)
 			errs = append(errs, validateTrailingRatchetTierMonotonicity(tiers, sub+".tp_tiers")...)
+			errs = append(errs, validateTrailingRatchetInitialTrail(tiers, initialTrail, sub+".tp_tiers")...)
 			continue
 		}
 		tiers, subErrs := parseTrailingRatchetTierList(raw, sub+".tp_tiers")
 		errs = append(errs, subErrs...)
 		errs = append(errs, validateTrailingRatchetTierMonotonicity(tiers, sub+".tp_tiers")...)
+		errs = append(errs, validateTrailingRatchetInitialTrail(tiers, initialTrail, sub+".tp_tiers")...)
 	}
 	return errs
+}
+
+// validateTrailingRatchetInitialTrail rejects a first ratchet rung whose trail
+// distance is looser than (greater than) the strategy-level
+// trailing_stop_atr_mult. The first rung can only tighten the initial trail —
+// a looser first rung would silently no-op at runtime (applyTrailingTPRatchet
+// never loosens), so catch the misconfiguration at load. Tiers are sorted
+// ascending by atr_multiple, so tiers[0] is the first rung and monotonicity
+// guarantees the rest are <= it.
+func validateTrailingRatchetInitialTrail(tiers []trailingRatchetTier, initialTrail float64, ctxLabel string) []string {
+	if len(tiers) == 0 || initialTrail <= 0 {
+		return nil
+	}
+	if tiers[0].TrailingMultAfter > initialTrail+1e-12 {
+		return []string{fmt.Sprintf(
+			"%s[0].trailing distance %.4g×ATR must be <= initial trailing_stop_atr_mult (%.4g×ATR) — the first ratchet rung can only tighten",
+			ctxLabel, tiers[0].TrailingMultAfter, initialTrail,
+		)}
+	}
+	return nil
 }
 
 func validateTrailingRatchetTierMonotonicity(tiers []trailingRatchetTier, ctxLabel string) []string {
