@@ -578,6 +578,14 @@ func runHyperliquidProtectionSync(
 					plan.ForceSLReplace = forceSL
 					plan.ForceTPReplace = forceTP
 				}
+				if pos.ScaleInResizePending {
+					// #873: a scale-in grew the size at the frozen triggers —
+					// force-replace SL + already-placed TP tiers so they cover
+					// the new total. OR with any regime-change force flags.
+					fSL, fTP := scaleInProtectionForceReplace(pos, plan)
+					plan.ForceSLReplace = plan.ForceSLReplace || fSL
+					plan.ForceTPReplace = orForceReplace(plan.ForceTPReplace, fTP)
+				}
 			}
 		}
 		mu.Unlock()
@@ -585,6 +593,11 @@ func runHyperliquidProtectionSync(
 		mu.RLock()
 		if pos, ok := stratState.Positions[symbol]; ok {
 			plan, syncOK = buildHyperliquidProtectionPlan(sc, pos)
+			if syncOK && pos.ScaleInResizePending {
+				// #873: re-size SL + un-cleared TP tiers to the grown total at
+				// the frozen trigger geometry; the watermark is not reset.
+				plan.ForceSLReplace, plan.ForceTPReplace = scaleInProtectionForceReplace(pos, plan)
+			}
 		}
 		mu.RUnlock()
 	}
@@ -602,6 +615,9 @@ func runHyperliquidProtectionSync(
 		return false
 	}
 	applyHyperliquidProtectionSync(pos, protection, plan.CancelTPOIDs)
+	// #873: the scale-in re-size has been applied on-chain; clear the one-shot
+	// flag so subsequent syncs don't keep force-replacing unchanged triggers.
+	pos.ScaleInResizePending = false
 	if logger != nil && len(protection.TPCancelFilledOIDs) > 0 {
 		logger.Info("surplus TP OIDs filled on-chain (reconciler will book): %v", protection.TPCancelFilledOIDs)
 	}
