@@ -277,6 +277,19 @@ func main() {
 	defer cleanupNotifier()
 	fmt.Printf("Notification backends: %d active\n", notifier.BackendCount())
 
+	// Attach Discord slash commands (issue #212). Non-fatal: registration
+	// failures are logged + DM'd to the owner but never stop the daemon.
+	if d := notifier.DiscordBackend(); d != nil {
+		if err := d.RegisterSlashCommands(server, cfg); err != nil {
+			fmt.Printf("[WARN] Discord slash command registration failed: %v\n", err)
+			if notifier.HasOwner() {
+				notifier.SendOwnerDM("[slash] registration failed: " + err.Error())
+			}
+		} else {
+			fmt.Println("Discord slash commands registered")
+		}
+	}
+
 	// Phase 2 + 3 of graceful shutdown — registered AFTER cleanupNotifier so
 	// LIFO ordering puts this defer BEFORE notifier flush. Sequence on
 	// natural return from the trading loop:

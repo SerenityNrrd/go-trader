@@ -403,6 +403,43 @@ If Discord enabled, wait for the first cycle and verify messages in configured c
 
 ---
 
+## Discord Slash Commands (#212)
+
+The bot registers global slash commands at startup (`scheduler/discord_commands.go`,
+wired in `main.go` via `DiscordNotifier.RegisterSlashCommands`). Global registration
+covers every guild the bot is in plus DMs; first-time command-shape changes can take up
+to ~1h to propagate.
+
+**Setup:** the bot must be invited with the `applications.commands` OAuth scope (in
+addition to `bot`) for the commands to appear. No code/config change — re-invite via the
+Discord developer portal OAuth2 URL generator.
+
+**Read-only** (usable in a guild OR a DM, by anyone):
+`/status`, `/health`, `/positions`, `/pnl`, `/leaderboard [top]`, `/circuit-breakers`,
+`/dead-strategies`, `/correlation`. These read live in-process state via the
+`StatusServer` (no HTTP round-trip). The four that fetch live marks (`/status`,
+`/positions`, `/pnl`, `/leaderboard`) use a deferred ACK + follow-up so they don't blow
+Discord's 3-second interaction deadline (`fetchLiveMarkPrices` spawns a Python subprocess +
+venue HTTP); the rest answer inline. Replies are public in-channel by default; set
+`discord.ephemeral_replies: true` in config to make read-only replies ephemeral
+(visible only to the invoker).
+
+**Ops** (owner-only AND DM-only; restricted via command `Contexts: [BotDM]` and re-checked
+in the handler by `authorizeCommand`):
+- `/logs [n]` — last N `journalctl -u go-trader` lines. Owner-DM-only because daemon logs
+  can carry wallet addresses / error payloads (sharper exposure than P&L/positions).
+- `/restart` — `systemctl restart go-trader` (ACKs, then this instance is replaced).
+- `/backtest <strategy> <symbol> [timeframe]` — runs `backtest/run_backtest.py --mode single`
+  (5-min timeout via `runPythonWithTimeout` + `shutdownReadOnlyCtx`; holds one of 4
+  `pythonSemaphore` slots while running); replies with a summary and attaches the full
+  report as `backtest.txt`.
+
+Auth lives in `authorizeCommand`; command set in `slashCommands()`; pure response builders
+(`format*Response`) are unit-tested in `discord_commands_test.go`. Registration failure is
+non-fatal (logged + owner DM).
+
+---
+
 ## TradingView Export
 
 Export SQLite trades to a TradingView portfolio transaction-import CSV:
