@@ -223,6 +223,23 @@ def test_defaults_system_does_not_inject(tmp_path):
     assert kwargs["close_strategies"][0]["params"].get("tp_tiers") is None
 
 
+def test_defaults_user_empty_tiers_not_injected(tmp_path):
+    # Go↔Python parity: an empty user tp_tiers is not a valid override — skip it
+    # so resolution falls through to the system default instead of injecting [].
+    path = _write_full_config(tmp_path, {
+        "config_version": 15,
+        "user_close_defaults": {"trailing_tp_ratchet": {"tp_tiers": []}},
+        "strategies": [{
+            "id": "hl-r", "type": "perps", "platform": "hyperliquid",
+            "open_strategy": {"name": "tema_cross_bd"},
+            "trailing_stop_atr_mult": 3.0,
+            "close_strategy": {"name": "trailing_tp_ratchet", "params": {"use_defaults": True}},
+        }],
+    })
+    kwargs = run_backtest.load_strategy_config(path, "hl-r", inject_user_defaults=True)
+    assert kwargs["close_strategies"][0]["params"].get("tp_tiers") is None
+
+
 def test_defaults_user_strategy_tiers_win(tmp_path):
     explicit = [{"atr_multiple": 5.0, "trailing_mult_after": 1.0, "close_fraction": 0.0}]
     path = _ratchet_cfg(tmp_path, {"tp_tiers": explicit})

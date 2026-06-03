@@ -107,7 +107,12 @@ def _apply_user_close_defaults(close_refs: list, user_defaults: Optional[dict]) 
         if not isinstance(entry, dict):
             continue
         tp = entry.get("tp_tiers")
-        if tp is not None:
+        # Mirror the Go loader (validateUserCloseDefaults): an empty or
+        # wrong-typed tp_tiers is not a valid override — injecting [] would
+        # suppress the system default. Skip it so resolution falls through to the
+        # evaluator's built-in default, matching the daemon (which rejects such a
+        # config outright at load).
+        if (isinstance(tp, list) or isinstance(tp, dict)) and tp:
             params["tp_tiers"] = tp
 
 
