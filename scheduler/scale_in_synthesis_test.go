@@ -145,6 +145,39 @@ func TestApplyHotReloadConfigRejectsScaleInChangeWithOpenPosition(t *testing.T) 
 	}
 }
 
+// For a trailing-SL strategy that also places on-chain TPs, the protection sync
+// re-sizes only the TPs (scaleInProtectionForceReplace returns forceSL=false
+// because plan.StopLossATRMult==0) and must DEFER the resize-pending clear to the
+// trailing walker — gated by effectiveTrailingStopPct > 0. A non-trailing (fixed
+// ATR) owner makes effectiveTrailingStopPct==0, so the sync owns the clear (#882).
+func TestScaleInTrailingSLOwnerDefersClearToWalker(t *testing.T) {
+	trail := 2.0
+	scTrailing := StrategyConfig{Type: "perps", Platform: "hyperliquid", TrailingStopATRMult: &trail}
+	pos := &Position{
+		Side: "long", Quantity: 200, InitialQuantity: 200, AvgCost: 2100, EntryATR: 50,
+		RiskAnchorPrice: 2000, ScaleInResizePending: true, TPOIDs: []int64{111, 222},
+	}
+	// Trailing walker owns the SL → the sync's plan carries no fixed ATR SL.
+	plan := hlProtectionPlan{StopLossATRMult: 0, Tiers: []hlProtectionTier{{Multiple: 1}, {Multiple: 2}}}
+	forceSL, forceTP := scaleInProtectionForceReplace(pos, plan)
+	if forceSL {
+		t.Errorf("forceSL = true, want false (trailing walker owns the SL; sync must not resize it)")
+	}
+	if len(forceTP) != 2 || !forceTP[0] || !forceTP[1] {
+		t.Errorf("forceTP = %v, want [true true] (both resting TP tiers resize on the sync)", forceTP)
+	}
+	// Sync clear gate: trailing owner → defer to walker.
+	if got := effectiveTrailingStopPct(scTrailing, pos); got <= 0 {
+		t.Errorf("trailing effectiveTrailingStopPct = %v, want > 0 (sync must defer the clear)", got)
+	}
+	// Non-trailing (fixed ATR) owner → sync owns the clear.
+	fixed := 1.5
+	scFixed := StrategyConfig{Type: "perps", Platform: "hyperliquid", StopLossATRMult: &fixed}
+	if got := effectiveTrailingStopPct(scFixed, pos); got != 0 {
+		t.Errorf("fixed-ATR effectiveTrailingStopPct = %v, want 0 (sync owns the clear)", got)
+	}
+}
+
 // The durable resize-pending flag survives a SaveState/LoadState round-trip so a
 // restart between an add and the deferred trailing-SL re-size still grows the SL
 // next cycle (#873 synthesis).

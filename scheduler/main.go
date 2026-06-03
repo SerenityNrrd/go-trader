@@ -1605,11 +1605,13 @@ func main() {
 									trades++
 									detail = fmt.Sprintf("[%s] LIVE TRAILING SL %s @ $%.2f", sc.ID, result.Symbol, fillPx)
 								}
-								// Clear only when the protection sync isn't the one that
-								// re-sizes on-chain TPs (it clears the flag itself); for a
-								// pure trailing-SL strategy the sync returns early, so the
-								// trailing path owns the clear.
-								if forceResize && updateConfirmed && !hyperliquidPlacesOnChainTPs(sc) {
+								// The trailing walker owns the SL re-size whenever it fires
+								// (this block only runs when effectiveTrailingStopPct > 0), so
+								// it always clears the flag — including when the strategy also
+								// places on-chain TPs (the sync re-sizes those but defers the
+								// flag clear to here, #882 review). The sync clears the flag
+								// only for non-trailing SL owners.
+								if forceResize && updateConfirmed {
 									if p, ok := stratState.Positions[result.Symbol]; ok && p != nil {
 										p.ScaleInResizePending = false
 									}
@@ -1855,7 +1857,11 @@ func main() {
 								if immediateFill, fillPx := applyTrailingStopUpdateResult(stratState, sc.Symbol, pos.Side, prevSLOID, newHighWater, updateConfirmed, slUpdate, logger); immediateFill {
 									logger.Info("[%s] manual trailing SL filled immediately %s @ $%.2f", sc.ID, sc.Symbol, fillPx)
 								}
-								if forceResize && updateConfirmed && !hyperliquidPlacesOnChainTPs(sc) {
+								// The manual trailing walker owns the SL re-size when it fires
+								// (ratchet closes place no on-chain TPs), so it always clears
+								// the flag; the sync defers the clear to here for trailing
+								// owners (#882 review).
+								if forceResize && updateConfirmed {
 									if p, ok := stratState.Positions[sc.Symbol]; ok && p != nil {
 										p.ScaleInResizePending = false
 									}

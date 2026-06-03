@@ -389,6 +389,11 @@ func runManualOpen(args []string) int {
 // EntryATR, the regime label, and the TP tier geometry stay frozen — only the
 // on-chain protection SIZING is re-based on the next scheduler cycle.
 func runManualAdd(args []string) int {
+	// #873: manual-add is the operator-intent path and deliberately bypasses the
+	// allow_scale_in flag and the scaleInLiveProtectionResizable load-time guard
+	// (those gate the strategy-flag perps path only). That is safe because a
+	// type=manual strategy always auto-configures an ATR stop-loss, which the
+	// protection-sync resize path can grow after an add.
 	fs := flag.NewFlagSet("manual-add", flag.ContinueOnError)
 	configPath := fs.String("config", "scheduler/config.json", "Path to config file")
 	size := fs.Float64("size", 0, "Add size in base units (coin qty)")

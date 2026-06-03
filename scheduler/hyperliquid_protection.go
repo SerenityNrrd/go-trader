@@ -621,7 +621,15 @@ func runHyperliquidProtectionSync(
 	applyHyperliquidProtectionSync(pos, protection, plan.CancelTPOIDs)
 	// #873: the scale-in re-size has been applied on-chain; clear the one-shot
 	// flag so subsequent syncs don't keep force-replacing unchanged triggers.
-	pos.ScaleInResizePending = false
+	// EXCEPT when the trailing walker owns the SL (effectiveTrailingStopPct > 0):
+	// this sync only re-sizes the on-chain TP tiers (plan.StopLossATRMult == 0 →
+	// no forceSL), and the SL re-size happens on a later Signal==0 cycle in the
+	// trailing walker, which reads this flag from its Phase-1 snapshot and clears
+	// it itself. Clearing here would hide the pending re-size from the walker and
+	// leave the trailing SL covering only the pre-add size (#882 review).
+	if effectiveTrailingStopPct(sc, pos) <= 0 {
+		pos.ScaleInResizePending = false
+	}
 	if logger != nil && len(protection.TPCancelFilledOIDs) > 0 {
 		logger.Info("surplus TP OIDs filled on-chain (reconciler will book): %v", protection.TPCancelFilledOIDs)
 	}
