@@ -21,6 +21,7 @@ type DiscordConfig struct {
 	TradeAlertChannels map[string]string `json:"trade_alert_channels,omitempty"` // optional override: route trade alerts to different channels than summaries; same key scheme as Channels; falls back to Channels on miss
 	LeaderboardTopN    int               `json:"leaderboard_top_n,omitempty"`    // number of entries shown in leaderboard messages (default 5)
 	LeaderboardChannel string            `json:"leaderboard_channel,omitempty"`  // dedicated Discord channel ID for leaderboard posts; when set, all leaderboards route here instead of being broadcast across platform channels
+	EphemeralReplies   bool              `json:"ephemeral_replies,omitempty"`    // when true, read-only slash-command replies (/status, /pnl, etc.) are ephemeral (visible only to the invoker); default false (public in channel)
 }
 
 // TelegramConfig holds Telegram notification settings.

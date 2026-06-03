@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/bwmarrin/discordgo"
 )
@@ -22,13 +23,15 @@ var readOnlyCommandNames = map[string]bool{
 	"circuit-breakers": true,
 	"dead-strategies":  true,
 	"correlation":      true,
-	"logs":             true,
 }
 
-// opsCommandNames mutate state or run heavy work; restricted to the owner in a DM.
+// opsCommandNames mutate state, run heavy work, or expose operator-sensitive
+// output; restricted to the owner in a DM. `logs` is here (not read-only)
+// because journalctl can carry wallet addresses and error payloads.
 var opsCommandNames = map[string]bool{
 	"restart":  true,
 	"backtest": true,
+	"logs":     true,
 }
 
 // authorizeCommand decides whether invokerID may run command `name`. Read-only
@@ -383,7 +386,7 @@ func slashCommands() []*discordgo.ApplicationCommand {
 		{Name: "circuit-breakers", Description: "Active circuit breakers and kill-switch state"},
 		{Name: "dead-strategies", Description: "Strategies that have never opened a position"},
 		{Name: "correlation", Description: "Correlation / concentration warnings"},
-		{Name: "logs", Description: "Recent journalctl lines", Options: []*discordgo.ApplicationCommandOption{
+		{Name: "logs", Description: "Recent journalctl lines (owner DM only)", Contexts: dmContext(), Options: []*discordgo.ApplicationCommandOption{
 			{Type: discordgo.ApplicationCommandOptionInteger, Name: "n", Description: "Number of lines (default 50, max 200)"},
 		}},
 		{Name: "restart", Description: "Restart the go-trader service (owner DM only)", Contexts: dmContext()},
@@ -428,22 +431,28 @@ func (d *DiscordNotifier) interactionCreate(s *discordgo.Session, i *discordgo.I
 		return
 	}
 	switch name {
+	// Mark-fetching read-only commands: fetchLiveMarkPrices spawns a Python
+	// subprocess + venue HTTP, which can exceed Discord's 3s deadline — so ACK
+	// first (deferred), then deliver the built response via a follow-up.
 	case "status":
-		respondText(s, i, d.buildReadOnly(formatStatusResponse))
+		d.respondReadOnlyDeferred(s, i, func() string { return d.buildReadOnly(formatStatusResponse) })
 	case "positions":
-		respondText(s, i, d.buildReadOnly(formatPositionsResponse))
-	case "health":
-		respondText(s, i, d.buildHealth())
+		d.respondReadOnlyDeferred(s, i, func() string { return d.buildReadOnly(formatPositionsResponse) })
 	case "pnl":
-		respondText(s, i, d.buildPnL())
+		d.respondReadOnlyDeferred(s, i, d.buildPnL)
 	case "leaderboard":
-		respondText(s, i, d.buildLeaderboard(optionInt(data.Options, "top", 5)))
+		top := optionInt(data.Options, "top", 5)
+		d.respondReadOnlyDeferred(s, i, func() string { return d.buildLeaderboard(top) })
+	// Fast read-only commands (no live-mark fetch): answer inline within 3s.
+	case "health":
+		d.respondReadOnlyInline(s, i, d.buildHealth())
 	case "circuit-breakers":
-		respondText(s, i, d.buildCircuitBreakers())
+		d.respondReadOnlyInline(s, i, d.buildCircuitBreakers())
 	case "dead-strategies":
-		respondText(s, i, d.buildDeadStrategies())
+		d.respondReadOnlyInline(s, i, d.buildDeadStrategies())
 	case "correlation":
-		respondText(s, i, d.buildCorrelation())
+		d.respondReadOnlyInline(s, i, d.buildCorrelation())
+	// Ops (owner DM only).
 	case "logs":
 		respondText(s, i, runLogs(optionInt(data.Options, "n", 50)))
 	case "restart":
@@ -484,13 +493,19 @@ func optionString(opts []*discordgo.ApplicationCommandInteractionDataOption, nam
 	return def
 }
 
-// truncateForDiscord caps content to Discord's 2000-char message limit.
+// truncateForDiscord caps content to Discord's 2000-char message limit, cutting
+// on a rune boundary so multibyte glyphs (the 🛑/⚠️ emoji in some replies) are
+// never split into an invalid trailing byte.
 func truncateForDiscord(s string) string {
 	const max = 2000
 	if len(s) <= max {
 		return s
 	}
-	return s[:max-3] + "..."
+	cut := max - 3 // reserve 3 bytes for the "..." ellipsis
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + "..."
 }
 
 func respondText(s *discordgo.Session, i *discordgo.InteractionCreate, content string) {
@@ -507,6 +522,48 @@ func respondEphemeral(s *discordgo.Session, i *discordgo.InteractionCreate, cont
 	_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 		Type: discordgo.InteractionResponseChannelMessageWithSource,
 		Data: &discordgo.InteractionResponseData{Content: truncateForDiscord(content), Flags: discordgo.MessageFlagsEphemeral},
+	})
+}
+
+// readOnlyReplyFlags returns MessageFlagsEphemeral when discord.ephemeral_replies
+// is set, else 0 (public in-channel). Applies to read-only command replies only;
+// ops replies are DM-only, where the ephemeral flag has no effect.
+func (d *DiscordNotifier) readOnlyReplyFlags() discordgo.MessageFlags {
+	if d.cfg != nil && d.cfg.Discord.EphemeralReplies {
+		return discordgo.MessageFlagsEphemeral
+	}
+	return 0
+}
+
+// respondReadOnlyInline answers a fast read-only command immediately (no live-mark
+// fetch), honoring the ephemeral-replies config flag.
+func (d *DiscordNotifier) respondReadOnlyInline(s *discordgo.Session, i *discordgo.InteractionCreate, content string) {
+	if content == "" {
+		content = "(no output)"
+	}
+	_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseChannelMessageWithSource,
+		Data: &discordgo.InteractionResponseData{Content: truncateForDiscord(content), Flags: d.readOnlyReplyFlags()},
+	})
+}
+
+// respondReadOnlyDeferred ACKs within Discord's 3s window, then runs the (slow,
+// live-mark-fetching) builder and delivers the result via a follow-up. Without
+// this, /status, /positions, /pnl, and /leaderboard would miss the deadline
+// because fetchLiveMarkPrices spawns a Python subprocess and venue HTTP calls.
+func (d *DiscordNotifier) respondReadOnlyDeferred(s *discordgo.Session, i *discordgo.InteractionCreate, build func() string) {
+	flags := d.readOnlyReplyFlags()
+	_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
+		Data: &discordgo.InteractionResponseData{Flags: flags},
+	})
+	content := build()
+	if content == "" {
+		content = "(no output)"
+	}
+	_, _ = s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{
+		Content: truncateForDiscord(content),
+		Flags:   flags,
 	})
 }
 
@@ -634,6 +691,9 @@ func (d *DiscordNotifier) handleBacktest(s *discordgo.Session, i *discordgo.Inte
 	deferAck(s, i)
 
 	args := []string{"--strategy", strategy, "--symbol", symbol, "--timeframe", timeframe, "--mode", "single"}
+	// Holds one of the 4 pythonSemaphore slots (executor.go) for up to 5 min —
+	// i.e. 25% of the Python concurrency the trading loop shares. Acceptable
+	// because /backtest is owner-gated and can't be spammed by guild members.
 	stdout, stderr, err := runPythonWithTimeout(shutdownReadOnlyCtx, "backtest/run_backtest.py", args, nil, 5*time.Minute)
 	report := string(stdout)
 	if err != nil {

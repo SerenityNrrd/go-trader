@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 func TestDiscordBackend(t *testing.T) {
@@ -30,7 +31,9 @@ func TestAuthorizeCommand(t *testing.T) {
 		{"status", "anyone", "guild1", true}, // read-only in guild OK
 		{"status", "anyone", "", true},       // read-only in DM OK
 		{"positions", "anyone", "guild1", true},
-		{"logs", "anyone", "guild1", true},
+		{"logs", "anyone", "guild1", false}, // logs is ops now: guild rejected
+		{"logs", "intruder", "", false},     // logs is ops now: non-owner DM rejected
+		{"logs", owner, "", true},           // logs is ops now: owner DM OK
 		{"restart", owner, "", true},        // ops: owner in DM OK
 		{"restart", owner, "guild1", false}, // ops: owner in guild rejected (must be DM)
 		{"restart", "intruder", "", false},  // ops: non-owner in DM rejected
@@ -226,5 +229,32 @@ func TestParseBacktestSummary(t *testing.T) {
 	// Missing labels degrade to a dash rather than erroring.
 	if got := parseBacktestSummary("no metrics here"); !strings.Contains(got, "—") {
 		t.Errorf("expected dash for missing metrics, got: %s", got)
+	}
+}
+
+func TestTruncateForDiscord(t *testing.T) {
+	// Short input is returned unchanged.
+	if got := truncateForDiscord("hello"); got != "hello" {
+		t.Errorf("short input mutated: %q", got)
+	}
+
+	// Over-limit ASCII input is capped to 2000 bytes with an ellipsis.
+	long := strings.Repeat("a", 2500)
+	got := truncateForDiscord(long)
+	if len(got) > 2000 {
+		t.Errorf("truncated output exceeds 2000 bytes: %d", len(got))
+	}
+	if !strings.HasSuffix(got, "...") {
+		t.Errorf("expected ellipsis suffix, got tail: %q", got[len(got)-5:])
+	}
+
+	// Multibyte runes at the cut boundary must not be split (no invalid bytes).
+	multibyte := strings.Repeat("🛑", 1000) // 4 bytes each = 4000 bytes
+	got = truncateForDiscord(multibyte)
+	if len(got) > 2000 {
+		t.Errorf("truncated multibyte output exceeds 2000 bytes: %d", len(got))
+	}
+	if !utf8.ValidString(got) {
+		t.Errorf("truncation split a rune (invalid UTF-8): %q", got)
 	}
 }
