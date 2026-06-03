@@ -1,6 +1,10 @@
 package main
 
-import "testing"
+import (
+	"strings"
+	"testing"
+	"time"
+)
 
 func TestDiscordBackend(t *testing.T) {
 	// No Discord backend present.
@@ -43,5 +47,40 @@ func TestAuthorizeCommand(t *testing.T) {
 		if !ok && reason == "" {
 			t.Errorf("authorizeCommand(%q,...) denied without a reason", c.name)
 		}
+	}
+}
+
+func TestFormatHealthResponse(t *testing.T) {
+	now := time.Date(2026, 6, 3, 12, 0, 0, 0, time.UTC)
+
+	never := formatHealthResponse(time.Time{}, 0, "v1", now)
+	if !strings.Contains(never, "never") {
+		t.Errorf("expected 'never' for zero last cycle, got: %s", never)
+	}
+
+	ok := formatHealthResponse(now.Add(-1*time.Minute), 42, "v1", now)
+	if !strings.Contains(ok, "ok") || !strings.Contains(ok, "42") {
+		t.Errorf("expected ok status with cycle count, got: %s", ok)
+	}
+
+	stale := formatHealthResponse(now.Add(-31*time.Minute), 42, "v1", now)
+	if !strings.Contains(stale, "stale") {
+		t.Errorf("expected stale status, got: %s", stale)
+	}
+}
+
+func TestFormatStatusResponse(t *testing.T) {
+	state := &AppState{Strategies: map[string]*StrategyState{
+		"hl-a": {ID: "hl-a", Platform: "hyperliquid", Cash: 100,
+			Positions: map[string]*Position{"BTC": {Symbol: "BTC", Quantity: 1, AvgCost: 50, Side: "long"}},
+			Regime:    "trend_up"},
+	}}
+	prices := map[string]float64{"BTC": 60}
+	got := formatStatusResponse(state, prices)
+	if !strings.Contains(got, "positions=1") {
+		t.Errorf("expected 1 position in status, got: %s", got)
+	}
+	if !strings.Contains(got, "regime=trend_up") {
+		t.Errorf("expected regime in status, got: %s", got)
 	}
 }
