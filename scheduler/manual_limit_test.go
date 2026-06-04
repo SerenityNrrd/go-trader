@@ -119,6 +119,59 @@ func TestParseHyperliquidCancelOrderOutput(t *testing.T) {
 	}
 }
 
+func TestLimitStatusSinceMs(t *testing.T) {
+	// Zero time → 0 (Python falls back to its 7-day window).
+	if got := limitStatusSinceMs(time.Time{}); got != 0 {
+		t.Errorf("zero time should map to 0, got %d", got)
+	}
+	// A real placement time → that time minus a 60s skew buffer, in ms.
+	created := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	want := created.Add(-60 * time.Second).UnixMilli()
+	if got := limitStatusSinceMs(created); got != want {
+		t.Errorf("sinceMs = %d, want %d (createdAt - 60s)", got, want)
+	}
+}
+
+// TestReconcilePendingLimitOrdersAnchorsLookbackToPlacement is the #886 review
+// regression: the fill poll must reach back to the order's placement time, not a
+// rolling 7-day window, so a fill on an order resting >7 days is never missed.
+func TestReconcilePendingLimitOrdersAnchorsLookbackToPlacement(t *testing.T) {
+	sc, state := newLimitTestStrategy()
+	cfg := &Config{Strategies: []StrategyConfig{sc}}
+	db := newLimitTestStateDB(t)
+	var mu sync.RWMutex
+	// Order placed 30 days ago — far outside the default 7-day window.
+	placed := time.Now().UTC().Add(-30 * 24 * time.Hour)
+	db.InsertPendingLimitOrder(PendingLimitOrder{
+		StrategyID: sc.ID, Symbol: "ETH", Side: "long", OrderOID: 9001,
+		LimitPrice: 2000, OrderSize: 0.5, TIF: "Alo", EntryATR: 50, CreatedAt: placed,
+	})
+
+	var gotSinceMs int64 = -1
+	withStubbedLimitDeps(t,
+		func(_ string, _ string, _ []int64, sinceMs int64) (*HyperliquidLimitStatusResult, string, error) {
+			gotSinceMs = sinceMs
+			return &HyperliquidLimitStatusResult{Orders: []HyperliquidLimitOrderStatus{
+				{OID: 9001, Resting: limitTestBoolPtr(true), FilledSize: 0},
+			}}, "", nil
+		},
+		func(string, string, int64) (*HyperliquidCancelOrderResult, string, error) {
+			return &HyperliquidCancelOrderResult{}, "", nil
+		},
+	)
+	reconcilePendingLimitOrders(state, cfg, db, &mu, nil, nil)
+
+	want := limitStatusSinceMs(placed)
+	if gotSinceMs != want {
+		t.Errorf("status poll sinceMs = %d, want %d (anchored to 30-day-old placement, not a 7-day window)", gotSinceMs, want)
+	}
+	// Sanity: the anchor is well before a 7-day-only window would reach.
+	sevenDaysAgo := time.Now().UTC().Add(-7 * 24 * time.Hour).UnixMilli()
+	if gotSinceMs >= sevenDaysAgo {
+		t.Errorf("sinceMs %d should be older than 7 days ago %d", gotSinceMs, sevenDaysAgo)
+	}
+}
+
 func TestLimitOrderFullyFilled(t *testing.T) {
 	if !limitOrderFullyFilled(1.0, 1.0) {
 		t.Error("exact match should be full")
@@ -325,7 +378,7 @@ func TestPendingLimitOrderCRUD(t *testing.T) {
 
 // withStubbedLimitDeps swaps the subprocess hooks the reconcile uses and returns
 // a restore func. The protection sync is stubbed so no .venv is needed.
-func withStubbedLimitDeps(t *testing.T, status func(script, symbol string, oids []int64) (*HyperliquidLimitStatusResult, string, error), cancel func(script, symbol string, oid int64) (*HyperliquidCancelOrderResult, string, error)) {
+func withStubbedLimitDeps(t *testing.T, status func(script, symbol string, oids []int64, sinceMs int64) (*HyperliquidLimitStatusResult, string, error), cancel func(script, symbol string, oid int64) (*HyperliquidCancelOrderResult, string, error)) {
 	t.Helper()
 	origStatus := runHyperliquidLimitStatusFn
 	origCancel := runHyperliquidCancelOrderFn
@@ -358,7 +411,7 @@ func TestReconcilePendingLimitOrdersFullFill(t *testing.T) {
 
 	// Status: fully filled, no longer resting.
 	withStubbedLimitDeps(t,
-		func(string, string, []int64) (*HyperliquidLimitStatusResult, string, error) {
+		func(string, string, []int64, int64) (*HyperliquidLimitStatusResult, string, error) {
 			return &HyperliquidLimitStatusResult{Orders: []HyperliquidLimitOrderStatus{
 				{OID: 9001, Resting: limitTestBoolPtr(false), FilledSize: 0.5, AvgPx: 2000, Fee: 0.7, Count: 1},
 			}}, "", nil
@@ -395,7 +448,7 @@ func TestReconcilePendingLimitOrdersPartialThenComplete(t *testing.T) {
 
 	// Cycle 1: partial 0.4, still resting.
 	withStubbedLimitDeps(t,
-		func(string, string, []int64) (*HyperliquidLimitStatusResult, string, error) {
+		func(string, string, []int64, int64) (*HyperliquidLimitStatusResult, string, error) {
 			return &HyperliquidLimitStatusResult{Orders: []HyperliquidLimitOrderStatus{
 				{OID: 9001, Resting: limitTestBoolPtr(true), FilledSize: 0.4, AvgPx: 2000, Fee: 0.2, Count: 1},
 			}}, "", nil
@@ -415,7 +468,7 @@ func TestReconcilePendingLimitOrdersPartialThenComplete(t *testing.T) {
 
 	// Cycle 2: completes to 1.0, no longer resting.
 	withStubbedLimitDeps(t,
-		func(string, string, []int64) (*HyperliquidLimitStatusResult, string, error) {
+		func(string, string, []int64, int64) (*HyperliquidLimitStatusResult, string, error) {
 			return &HyperliquidLimitStatusResult{Orders: []HyperliquidLimitOrderStatus{
 				{OID: 9001, Resting: limitTestBoolPtr(false), FilledSize: 1.0, AvgPx: 2005, Fee: 0.5, Count: 2},
 			}}, "", nil
@@ -448,7 +501,7 @@ func TestReconcilePendingLimitOrdersCancelRequested(t *testing.T) {
 	// Still resting, no fill. Cancel must be issued; row retained for next cycle.
 	cancelCalls := 0
 	withStubbedLimitDeps(t,
-		func(string, string, []int64) (*HyperliquidLimitStatusResult, string, error) {
+		func(string, string, []int64, int64) (*HyperliquidLimitStatusResult, string, error) {
 			return &HyperliquidLimitStatusResult{Orders: []HyperliquidLimitOrderStatus{
 				{OID: 9001, Resting: limitTestBoolPtr(true), FilledSize: 0, AvgPx: 0, Fee: 0},
 			}}, "", nil
@@ -471,7 +524,7 @@ func TestReconcilePendingLimitOrdersCancelRequested(t *testing.T) {
 
 	// Next cycle: order gone (resting=false), no fill → finalize + delete.
 	withStubbedLimitDeps(t,
-		func(string, string, []int64) (*HyperliquidLimitStatusResult, string, error) {
+		func(string, string, []int64, int64) (*HyperliquidLimitStatusResult, string, error) {
 			return &HyperliquidLimitStatusResult{Orders: []HyperliquidLimitOrderStatus{
 				{OID: 9001, Resting: limitTestBoolPtr(false), FilledSize: 0},
 			}}, "", nil
@@ -500,7 +553,7 @@ func TestReconcilePendingLimitOrdersExpiry(t *testing.T) {
 
 	cancelCalls := 0
 	withStubbedLimitDeps(t,
-		func(string, string, []int64) (*HyperliquidLimitStatusResult, string, error) {
+		func(string, string, []int64, int64) (*HyperliquidLimitStatusResult, string, error) {
 			return &HyperliquidLimitStatusResult{Orders: []HyperliquidLimitOrderStatus{
 				{OID: 9001, Resting: limitTestBoolPtr(true), FilledSize: 0},
 			}}, "", nil
@@ -529,7 +582,7 @@ func TestReconcilePendingLimitOrdersDeferOnUnknownBook(t *testing.T) {
 		LimitPrice: 2000, OrderSize: 0.5, TIF: "Alo", EntryATR: 50, CreatedAt: time.Now().UTC(),
 	})
 	withStubbedLimitDeps(t,
-		func(string, string, []int64) (*HyperliquidLimitStatusResult, string, error) {
+		func(string, string, []int64, int64) (*HyperliquidLimitStatusResult, string, error) {
 			return &HyperliquidLimitStatusResult{OpenOrdersError: "boom", Orders: []HyperliquidLimitOrderStatus{
 				{OID: 9001, Resting: nil, FilledSize: 0},
 			}}, "", nil

@@ -125,7 +125,13 @@ func parseHyperliquidLimitStatusOutput(stdout []byte, stderrStr string, runErr e
 }
 
 // RunHyperliquidLimitStatus polls fill/resting status for the given OIDs.
-func RunHyperliquidLimitStatus(script, symbol string, oids []int64) (*HyperliquidLimitStatusResult, string, error) {
+// sinceMs is the userFills lookback floor (epoch ms); pass the order's placement
+// time so the cumulative-fill summary always reaches back to when the order was
+// placed. 0 lets Python fall back to its rolling 7-day window — which would
+// silently undercount cumulative fills on an order resting longer than 7 days
+// (an earlier partial ages out of the window, so a later fill reads as ≤ the
+// already-booked watermark and is skipped). (#886 review)
+func RunHyperliquidLimitStatus(script, symbol string, oids []int64, sinceMs int64) (*HyperliquidLimitStatusResult, string, error) {
 	oidsJSON, err := json.Marshal(oids)
 	if err != nil {
 		return nil, "", fmt.Errorf("marshal oids: %w", err)
@@ -136,8 +142,25 @@ func RunHyperliquidLimitStatus(script, symbol string, oids []int64) (*Hyperliqui
 		fmt.Sprintf("--oids-json=%s", string(oidsJSON)),
 		"--mode=live",
 	}
+	if sinceMs > 0 {
+		args = append(args, fmt.Sprintf("--since-ms=%d", sinceMs))
+	}
 	stdout, stderr, runErr := runPythonSideEffect(script, args)
 	return parseHyperliquidLimitStatusOutput(stdout, string(stderr), runErr)
+}
+
+// limitStatusSinceMs returns the userFills lookback floor for an order's fill
+// poll: its placement time minus a 60s buffer for local-vs-indexer clock skew.
+// Zero when the row has no recorded createdAt (Python then defaults to 7 days).
+func limitStatusSinceMs(createdAt time.Time) int64 {
+	if createdAt.IsZero() {
+		return 0
+	}
+	ms := createdAt.Add(-60 * time.Second).UnixMilli()
+	if ms < 0 {
+		return 0
+	}
+	return ms
 }
 
 func parseHyperliquidCancelOrderOutput(stdout []byte, stderrStr string, runErr error) (*HyperliquidCancelOrderResult, string, error) {
@@ -574,8 +597,10 @@ func reconcilePendingLimitOrders(state *AppState, cfg *Config, stateDB *StateDB,
 			logger, _ = logMgr.GetStrategyLogger(o.StrategyID)
 		}
 
-		// 1. Poll fill/resting status (subprocess, no lock).
-		statusRes, stderr, perr := runHyperliquidLimitStatusFn(sc.Script, o.Symbol, []int64{o.OrderOID})
+		// 1. Poll fill/resting status (subprocess, no lock). Anchor the fill
+		// lookback to the order's placement time so an order resting >7 days
+		// never has an earlier partial age out of the window (#886 review).
+		statusRes, stderr, perr := runHyperliquidLimitStatusFn(sc.Script, o.Symbol, []int64{o.OrderOID}, limitStatusSinceMs(o.CreatedAt))
 		if stderr != "" {
 			fmt.Fprintf(os.Stderr, "[limit] %s status stderr: %s\n", o.StrategyID, stderr)
 		}
@@ -598,8 +623,24 @@ func reconcilePendingLimitOrders(state *AppState, cfg *Config, stateDB *StateDB,
 			if avgPx <= 0 {
 				avgPx = o.LimitPrice
 			}
+			// Resolve entry ATR at the first fill, and re-resolve on a later
+			// partial if the position is still missing ATR — e.g. the first-fill
+			// fetch failed (and the leverage fallback couldn't apply), leaving the
+			// position naked for ATR-based protection. Re-fetching on the next
+			// partial heals it instead of staying naked for the order's life
+			// (#886 review). Operator-supplied o.EntryATR short-circuits the fetch.
 			entryATR := o.EntryATR
-			if o.FilledSize == 0 {
+			resolveATR := o.FilledSize == 0
+			if !resolveATR {
+				mu.RLock()
+				if ss := state.Strategies[o.StrategyID]; ss != nil {
+					if p := ss.Positions[o.Symbol]; p != nil && p.EntryATR == 0 {
+						resolveATR = true
+					}
+				}
+				mu.RUnlock()
+			}
+			if resolveATR {
 				entryATR = resolveLimitFillEntryATR(sc, o.EntryATR, avgPx, notifier)
 			}
 			mu.Lock()
