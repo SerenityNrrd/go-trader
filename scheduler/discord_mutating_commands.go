@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -165,6 +164,8 @@ func buildAddStrategyEntry(name, platform, asset string) (string, json.RawMessag
 		if isBidirectionalPerpsStrategy(name) {
 			direction = DirectionBoth
 		}
+		// No explicit SL field: all-omitted defaults to 1.0×ATR + max_drawdown_pct backstop.
+		// Set a stop via `/config set strategies.<id>.stop_loss_atr_mult <val>` before /paper-to-live.
 		obj = map[string]interface{}{
 			"id":               id,
 			"type":             "perps",
@@ -648,7 +649,7 @@ func (d *DiscordNotifier) applyConfigChange(s *discordgo.Session, i *discordgo.I
 		followupText(s, i, doneMsg+"\nApplying via **service restart** — this instance briefly goes offline; the new one resumes the cycle.")
 		// Fire-and-forget; this process is about to be replaced.
 		go func() {
-			_ = exec.Command("systemctl", "restart", "go-trader").Run()
+			_ = restartSelf()
 		}()
 		return
 	}

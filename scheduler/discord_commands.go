@@ -735,7 +735,7 @@ func (d *DiscordNotifier) handleRestart(s *discordgo.Session, i *discordgo.Inter
 	})
 	// Fire-and-forget; this process is about to be replaced.
 	go func() {
-		_ = exec.Command("systemctl", "restart", "go-trader").Run()
+		_ = restartSelf()
 	}()
 }
 
