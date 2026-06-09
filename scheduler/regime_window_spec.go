@@ -302,11 +302,36 @@ func validateStrategyRegimeVocabulary(cfg *Config) []string {
 			polErrs := sc.RegimeDirectionalPolicy.ResolveRawWithLabels(prefix+".regime_directional_policy", dirLabels)
 			errs = append(errs, polErrs...)
 		}
-		// #907: regime_window_divergence shape validation (window names, on_divergence).
-		// Window-reference existence is checked in validateRegimeWindowsConfig.
+		// #907: regime_window_divergence shape validation (window names, on_divergence)
+		// AND window-existence. Both run here (not in validateRegimeWindowsConfig)
+		// because ResolveRaw populates ShortWindow/MediumWindow — and that function
+		// runs BEFORE this one in validateConfig, so the typed fields are empty there
+		// and an existence guard keyed on them would silently skip (PR #916 review).
 		if sc.RegimeWindowDivergence.IsConfigured() {
 			divErrs := sc.RegimeWindowDivergence.ResolveRaw(prefix + ".regime_window_divergence")
 			errs = append(errs, divErrs...)
+			// Existence check only when shape resolved cleanly and regime windows exist.
+			if len(divErrs) == 0 && rc != nil && rc.Enabled {
+				for _, pair := range []struct {
+					field string
+					value string
+				}{
+					{"short_window", sc.RegimeWindowDivergence.ShortWindow},
+					{"medium_window", sc.RegimeWindowDivergence.MediumWindow},
+				} {
+					key := normalizeRegimeWindowKey(pair.value)
+					if key == "" || key == regimeWindowDefaultKey {
+						continue
+					}
+					if !regimeMultiWindowEnabled(rc) {
+						errs = append(errs, fmt.Sprintf("%s: regime_window_divergence.%s=%q requires regime.windows to be configured", prefix, pair.field, pair.value))
+						continue
+					}
+					if !regimeWindowExists(rc, key) {
+						errs = append(errs, fmt.Sprintf("%s: regime_window_divergence.%s=%q not found in regime.windows (valid: %s)", prefix, pair.field, pair.value, strings.Join(sortedRegimeWindowNamesFromConfig(rc.Windows), ", ")))
+					}
+				}
+			}
 		}
 		// stop_loss_atr_regime / trailing_stop_atr_regime vocabulary is resolved
 		// authoritatively in validateRegimeATRConfig (which also populates the

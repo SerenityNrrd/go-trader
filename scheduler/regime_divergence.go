@@ -85,6 +85,7 @@ type RegimeDivergenceState struct {
 	Medium            string `json:"medium"`
 	Kind              string `json:"kind"`
 	ResolvedDirection string `json:"resolved_direction,omitempty"`
+	TrustingWindow    string `json:"trusting_window,omitempty"` // "short" or "medium" — which window the override follows
 	CyclesActive      int    `json:"cycles_active"`
 }
 
@@ -270,9 +271,12 @@ func biasDirection(b divergenceBias) string {
 }
 
 // classifyRegimeDivergence computes the divergence kind and override direction
-// for a pair of regime labels. shortSnap provides the Metrics map for
-// ranging_directional sign resolution on the short window.
-func classifyRegimeDivergence(shortLabel, mediumLabel string, shortReturnEff float64, onDivergence string) DivergenceResult {
+// for a pair of regime labels. shortReturnEff / mediumReturnEff provide the
+// per-window return-efficiency metric for ranging_directional sign resolution.
+// Both signs are resolved symmetrically so trust_medium can resolve a direction
+// when the medium window is ranging_directional, and hard divergence on a
+// ranging_directional side is not undercounted.
+func classifyRegimeDivergence(shortLabel, mediumLabel string, shortReturnEff, mediumReturnEff float64, onDivergence string) DivergenceResult {
 	result := DivergenceResult{
 		ShortLabel:  shortLabel,
 		MediumLabel: mediumLabel,
@@ -280,7 +284,7 @@ func classifyRegimeDivergence(shortLabel, mediumLabel string, shortReturnEff flo
 	}
 
 	shortBias := regimeLabelBias(shortLabel, shortReturnEff)
-	mediumBias := regimeLabelBias(mediumLabel, 0) // medium sign not used for override
+	mediumBias := regimeLabelBias(mediumLabel, mediumReturnEff)
 
 	if shortBias == mediumBias {
 		return result
@@ -324,6 +328,22 @@ func classifyRegimeDivergence(shortLabel, mediumLabel string, shortReturnEff flo
 // Open positions are NOT affected — this function reads posQty to guard against
 // changing the effective direction when a position is already open (hold-on-
 // transition freeze: the position runs to its natural exit under pos.Regime).
+//
+// LIMITATION — gate, not signal flip: the override runs AFTER the signal script
+// has already produced its raw signal (scForCheck captured the pre-override
+// --direction), so it can only filter which side the post-script direction
+// machinery (PerpsOrderSkipReason / perpsLiveOrderSize) admits. It does NOT
+// re-run the script with a flipped direction. Practical effect:
+//   - direction="both" base: the script emits both buy and sell signals, so the
+//     override genuinely selects which side opens (full flip behavior — the
+//     intended case, matching the #907 ETH example which resolves to "both").
+//   - direction="long"/"short" base: the script only ever emits its one side, so
+//     a trust_short override resolving to the opposite side acts as a stand-aside
+//     gate (it blocks the base side's new entries; it cannot synthesize the
+//     opposite entry). Use direction="both" for full divergence-driven flipping.
+//
+// This intentionally differs from regime_directional_policy, which couples
+// direction with invert_signal to synthesize the opposite side.
 func applyRegimeDivergenceOverride(sc *StrategyConfig, payload RegimePayload, rc *RegimeConfig, posQty float64) DivergenceResult {
 	if sc == nil || sc.RegimeWindowDivergence.IsZero() {
 		return DivergenceResult{Kind: DivergenceNone}
@@ -333,13 +353,16 @@ func applyRegimeDivergenceOverride(sc *StrategyConfig, payload RegimePayload, rc
 	shortLabel := payload.Label(d.ShortWindow, rc)
 	mediumLabel := payload.Label(d.MediumWindow, rc)
 
-	// Extract return_eff from the short window snapshot for ranging_directional.
-	var shortReturnEff float64
+	// Extract return_eff from each window snapshot for ranging_directional sign.
+	var shortReturnEff, mediumReturnEff float64
 	if snap, ok := payload.Windows[normalizeRegimeWindowKey(d.ShortWindow)]; ok {
 		shortReturnEff = snap.Metrics["return_eff"]
 	}
+	if snap, ok := payload.Windows[normalizeRegimeWindowKey(d.MediumWindow)]; ok {
+		mediumReturnEff = snap.Metrics["return_eff"]
+	}
 
-	result := classifyRegimeDivergence(shortLabel, mediumLabel, shortReturnEff, d.OnDivergence)
+	result := classifyRegimeDivergence(shortLabel, mediumLabel, shortReturnEff, mediumReturnEff, d.OnDivergence)
 
 	// Apply the override only when flat. When a position is open (posQty > 0),
 	// hold-on-transition semantics mean the position runs under pos.Regime — the
@@ -360,7 +383,13 @@ func updateStrategyDivergenceState(s *StrategyState, result DivergenceResult) {
 	if s == nil {
 		return
 	}
-	if result.Kind == DivergenceNone {
+	// Clear on anything that is not an active soft/hard divergence. This covers
+	// the zero-value DivergenceResult (Kind == "") that runHyperliquidCheck
+	// leaves on result.Divergence when the strategy has no divergence block
+	// configured — without this guard an unconfigured HL perps strategy would
+	// accrue a non-nil RegimeDivergence{Kind:""} with ever-growing CyclesActive
+	// and serialize it into /status. (PR #916 review)
+	if result.Kind != DivergenceSoft && result.Kind != DivergenceHard {
 		s.RegimeDivergence = nil
 		return
 	}
@@ -370,6 +399,7 @@ func updateStrategyDivergenceState(s *StrategyState, result DivergenceResult) {
 		Medium:            result.MediumLabel,
 		Kind:              string(result.Kind),
 		ResolvedDirection: result.OverrideDir,
+		TrustingWindow:    result.TrustingWindow,
 	}
 	if prev != nil &&
 		prev.Kind == next.Kind &&
@@ -382,17 +412,16 @@ func updateStrategyDivergenceState(s *StrategyState, result DivergenceResult) {
 }
 
 // formatDivergenceDMLine formats the trade DM line for active divergence.
-// Returns "" when divergence is not active.
+// Returns "" when divergence is not active. Names the trusted window from
+// TrustingWindow ("short"/"medium") rather than guessing from ResolvedDirection.
 func formatDivergenceDMLine(ds *RegimeDivergenceState) string {
 	if ds == nil || ds.Kind != string(DivergenceHard) || ds.ResolvedDirection == "" {
 		return ""
 	}
-	return fmt.Sprintf("⚠ regime divergence: medium=%s short=%s (since %d cycles, trusting %s)",
-		ds.Medium, ds.Short, ds.CyclesActive,
-		func() string {
-			if ds.ResolvedDirection != "" {
-				return ds.Short + " window"
-			}
-			return "medium window"
-		}())
+	trusting := ds.TrustingWindow
+	if trusting == "" {
+		trusting = "short" // backward-safe default
+	}
+	return fmt.Sprintf("⚠ regime divergence: medium=%s short=%s (since %d cycles, trusting %s window → %s)",
+		ds.Medium, ds.Short, ds.CyclesActive, trusting, ds.ResolvedDirection)
 }

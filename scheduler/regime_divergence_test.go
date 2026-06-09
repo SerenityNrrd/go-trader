@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -20,7 +21,7 @@ func TestClassifyRegimeDivergence_NoneWhenSame(t *testing.T) {
 		{"", ""}, // both empty
 	}
 	for _, tc := range cases {
-		r := classifyRegimeDivergence(tc.short, tc.medium, 0, onDivergenceTrustShort)
+		r := classifyRegimeDivergence(tc.short, tc.medium, 0, 0, onDivergenceTrustShort)
 		if r.Kind != DivergenceNone {
 			t.Errorf("short=%q medium=%q: expected none, got %q", tc.short, tc.medium, r.Kind)
 		}
@@ -38,7 +39,7 @@ func TestClassifyRegimeDivergence_SoftWhenOneNeutral(t *testing.T) {
 		{"ranging_quiet", "trending_down_choppy"}, // neutral vs bearish
 	}
 	for _, tc := range cases {
-		r := classifyRegimeDivergence(tc.short, tc.medium, 0, onDivergenceTrustShort)
+		r := classifyRegimeDivergence(tc.short, tc.medium, 0, 0, onDivergenceTrustShort)
 		if r.Kind != DivergenceSoft {
 			t.Errorf("short=%q medium=%q: expected soft, got %q", tc.short, tc.medium, r.Kind)
 		}
@@ -58,7 +59,7 @@ func TestClassifyRegimeDivergence_HardOppositeDirections(t *testing.T) {
 		{"trending_down", "trending_up_clean", DirectionShort},
 	}
 	for _, tc := range cases {
-		r := classifyRegimeDivergence(tc.short, tc.medium, 0, onDivergenceTrustShort)
+		r := classifyRegimeDivergence(tc.short, tc.medium, 0, 0, onDivergenceTrustShort)
 		if r.Kind != DivergenceHard {
 			t.Errorf("short=%q medium=%q: expected hard, got %q", tc.short, tc.medium, r.Kind)
 		}
@@ -73,7 +74,7 @@ func TestClassifyRegimeDivergence_HardOppositeDirections(t *testing.T) {
 
 func TestClassifyRegimeDivergence_TrustMedium(t *testing.T) {
 	// short=up, medium=down, trust_medium → follow medium (short)
-	r := classifyRegimeDivergence("trending_up_clean", "trending_down", 0, onDivergenceTrustMedium)
+	r := classifyRegimeDivergence("trending_up_clean", "trending_down", 0, 0, onDivergenceTrustMedium)
 	if r.Kind != DivergenceHard {
 		t.Fatalf("expected hard, got %q", r.Kind)
 	}
@@ -86,7 +87,7 @@ func TestClassifyRegimeDivergence_TrustMedium(t *testing.T) {
 }
 
 func TestClassifyRegimeDivergence_AlertOnly(t *testing.T) {
-	r := classifyRegimeDivergence("trending_up_clean", "trending_down", 0, onDivergenceAlertOnly)
+	r := classifyRegimeDivergence("trending_up_clean", "trending_down", 0, 0, onDivergenceAlertOnly)
 	if r.Kind != DivergenceHard {
 		t.Fatalf("expected hard, got %q", r.Kind)
 	}
@@ -100,7 +101,7 @@ func TestClassifyRegimeDivergence_AlertOnly(t *testing.T) {
 
 func TestClassifyRegimeDivergence_RangingDirectionalSign(t *testing.T) {
 	// ranging_directional with positive return_eff → bullish → should diverge hard against trending_down
-	r := classifyRegimeDivergence("ranging_directional", "trending_down", 0.05, onDivergenceTrustShort)
+	r := classifyRegimeDivergence("ranging_directional", "trending_down", 0.05, 0, onDivergenceTrustShort)
 	if r.Kind != DivergenceHard {
 		t.Fatalf("positive return_eff: expected hard, got %q", r.Kind)
 	}
@@ -109,13 +110,13 @@ func TestClassifyRegimeDivergence_RangingDirectionalSign(t *testing.T) {
 	}
 
 	// negative return_eff → bearish → same direction as trending_down → none
-	r2 := classifyRegimeDivergence("ranging_directional", "trending_down", -0.05, onDivergenceTrustShort)
+	r2 := classifyRegimeDivergence("ranging_directional", "trending_down", -0.05, 0, onDivergenceTrustShort)
 	if r2.Kind != DivergenceNone {
 		t.Errorf("negative return_eff: expected none, got %q", r2.Kind)
 	}
 
 	// zero return_eff → neutral → soft against trending_down
-	r3 := classifyRegimeDivergence("ranging_directional", "trending_down", 0, onDivergenceTrustShort)
+	r3 := classifyRegimeDivergence("ranging_directional", "trending_down", 0, 0, onDivergenceTrustShort)
 	if r3.Kind != DivergenceSoft {
 		t.Errorf("zero return_eff: expected soft, got %q", r3.Kind)
 	}
@@ -375,5 +376,139 @@ func TestUpdateStrategyDivergenceState_ClearsOnNone(t *testing.T) {
 	updateStrategyDivergenceState(s, DivergenceResult{Kind: DivergenceNone})
 	if s.RegimeDivergence != nil {
 		t.Error("expected RegimeDivergence cleared on none")
+	}
+}
+
+// PR #916 fix 1: the zero-value DivergenceResult (Kind=="") left on
+// result.Divergence for unconfigured strategies must clear state, not accrue
+// a non-nil RegimeDivergence with growing CyclesActive.
+func TestUpdateStrategyDivergenceState_ZeroValueClears(t *testing.T) {
+	s := &StrategyState{}
+	for i := 0; i < 3; i++ {
+		updateStrategyDivergenceState(s, DivergenceResult{}) // Kind == ""
+	}
+	if s.RegimeDivergence != nil {
+		t.Errorf("zero-value result must keep RegimeDivergence nil, got %+v", s.RegimeDivergence)
+	}
+}
+
+// PR #916 fix 4: the DM line must name the trusted window from TrustingWindow,
+// not infer "short" from ResolvedDirection.
+func TestFormatDivergenceDMLine_TrustsCorrectWindow(t *testing.T) {
+	ds := &RegimeDivergenceState{
+		Short:             "trending_up_clean",
+		Medium:            "trending_down",
+		Kind:              string(DivergenceHard),
+		ResolvedDirection: DirectionShort,
+		TrustingWindow:    "medium",
+		CyclesActive:      3,
+	}
+	line := formatDivergenceDMLine(ds)
+	if line == "" {
+		t.Fatal("expected non-empty DM line")
+	}
+	if !strings.Contains(line, "trusting medium window") {
+		t.Errorf("expected 'trusting medium window' in DM line, got: %q", line)
+	}
+	if !strings.Contains(line, "→ short") {
+		t.Errorf("expected resolved direction in DM line, got: %q", line)
+	}
+}
+
+func TestFormatDivergenceDMLine_EmptyWhenInactive(t *testing.T) {
+	if formatDivergenceDMLine(nil) != "" {
+		t.Error("nil state should produce empty line")
+	}
+	soft := &RegimeDivergenceState{Kind: string(DivergenceSoft)}
+	if formatDivergenceDMLine(soft) != "" {
+		t.Error("soft divergence should produce empty line")
+	}
+	noDir := &RegimeDivergenceState{Kind: string(DivergenceHard)}
+	if formatDivergenceDMLine(noDir) != "" {
+		t.Error("hard divergence without override dir should produce empty line")
+	}
+}
+
+// PR #916 fix 5: medium return_eff is resolved symmetrically, so trust_medium
+// can resolve a direction when the medium window is ranging_directional.
+func TestClassifyRegimeDivergence_TrustMediumRangingDirectional(t *testing.T) {
+	r := classifyRegimeDivergence("trending_down", "ranging_directional", 0, 0.05, onDivergenceTrustMedium)
+	if r.Kind != DivergenceHard {
+		t.Fatalf("expected hard divergence, got %q", r.Kind)
+	}
+	if r.OverrideDir != DirectionLong {
+		t.Errorf("trust_medium ranging_directional+: expected long, got %q", r.OverrideDir)
+	}
+}
+
+// PR #916 fix 2: a typo'd window name must be rejected at validation time,
+// not silently no-op at runtime. The existence check runs in
+// validateStrategyRegimeVocabulary (after ResolveRaw), so this exercises the
+// real ordering bug — validateRegimeWindowsConfig ran first with empty fields.
+func TestValidateStrategyRegimeVocabulary_RejectsBadDivergenceWindow(t *testing.T) {
+	mk := func(short, medium string) *RegimeWindowDivergence {
+		var d RegimeWindowDivergence
+		json.Unmarshal([]byte(`{"short_window":"`+short+`","medium_window":"`+medium+`","on_divergence":"trust_short"}`), &d)
+		return &d
+	}
+	cfg := &Config{
+		Regime: &RegimeConfig{
+			Enabled: true,
+			Windows: RegimeWindowsMap{
+				"composite_short":  {Classifier: regimeClassifierComposite, Period: 50},
+				"composite_medium": {Classifier: regimeClassifierComposite, Period: 200},
+			},
+		},
+		Strategies: []StrategyConfig{{
+			ID:                     "hl-test",
+			RegimeWindowDivergence: mk("does_not_exist", "composite_medium"),
+		}},
+	}
+	errs := validateStrategyRegimeVocabulary(cfg)
+	if len(errs) == 0 {
+		t.Fatal("expected error for non-existent short_window")
+	}
+	found := false
+	for _, e := range errs {
+		if strings.Contains(e, "does_not_exist") && strings.Contains(e, "not found in regime.windows") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected window-not-found error, got: %v", errs)
+	}
+}
+
+func TestValidateStrategyRegimeVocabulary_AcceptsGoodDivergenceWindows(t *testing.T) {
+	var d RegimeWindowDivergence
+	json.Unmarshal([]byte(`{"short_window":"composite_short","medium_window":"composite_medium","on_divergence":"trust_short"}`), &d)
+	cfg := &Config{
+		Regime: &RegimeConfig{
+			Enabled: true,
+			Windows: RegimeWindowsMap{
+				"composite_short":  {Classifier: regimeClassifierComposite, Period: 50},
+				"composite_medium": {Classifier: regimeClassifierComposite, Period: 200},
+			},
+		},
+		Strategies: []StrategyConfig{{
+			ID:                     "hl-test",
+			RegimeWindowDivergence: &d,
+		}},
+	}
+	errs := validateStrategyRegimeVocabulary(cfg)
+	for _, e := range errs {
+		if strings.Contains(e, "regime_window_divergence") {
+			t.Errorf("unexpected divergence validation error: %s", e)
+		}
+	}
+}
+
+// PR #916 fix 4: TrustingWindow is threaded into RegimeDivergenceState.
+func TestUpdateStrategyDivergenceState_CarriesTrustingWindow(t *testing.T) {
+	s := &StrategyState{}
+	r := DivergenceResult{Kind: DivergenceHard, ShortLabel: "trending_up_clean", MediumLabel: "trending_down", OverrideDir: DirectionShort, TrustingWindow: "medium"}
+	updateStrategyDivergenceState(s, r)
+	if s.RegimeDivergence == nil || s.RegimeDivergence.TrustingWindow != "medium" {
+		t.Errorf("expected TrustingWindow=medium, got %+v", s.RegimeDivergence)
 	}
 }
