@@ -1106,6 +1106,16 @@ func main() {
 
 			// Warning alert: drawdown approaching kill switch threshold.
 			if portfolioWarning && notifier.HasBackends() {
+				warnNow := time.Now().UTC()
+				var recentTrades []Trade
+				if stateDB != nil {
+					if rows, err := stateDB.RecentTrades(warnNow.Add(-portfolioWarningRecentWindow), portfolioWarningMaxRows); err != nil {
+						fmt.Printf("[WARN] portfolio warning recent-trade lookup failed: %v\n", err)
+					} else {
+						recentTrades = rows
+					}
+				}
+				var warnMsg string
 				mu.Lock()
 				// Source mirrors CheckPortfolioRisk's tie-break: margin wins
 				// ties so the newer #296 signal is surfaced preferentially.
@@ -1122,8 +1132,18 @@ func main() {
 				if portfolioWarnBandEntered {
 					addKillSwitchEvent(&state.PortfolioRisk, "warning", source, warnDD, totalPV, state.PortfolioRisk.PeakValue, portfolioReason)
 				}
+				warnMsg = BuildPortfolioWarningMessage(PortfolioWarningMessageInputs{
+					Reason:      portfolioReason,
+					Config:      cfg.PortfolioRisk,
+					State:       state,
+					Prices:      prices,
+					TotalValue:  totalPV,
+					PerpsLoss:   perpsLoss,
+					PerpsMargin: perpsMargin,
+					Recent:      recentTrades,
+					Now:         warnNow,
+				})
 				mu.Unlock()
-				warnMsg := fmt.Sprintf("**PORTFOLIO WARNING**\n%s", portfolioReason)
 				notifier.SendToAllChannels(warnMsg)
 				notifier.SendOwnerDM(warnMsg)
 				fmt.Printf("[WARN] %s\n", portfolioReason)
