@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 // yesterday returns the UTC date string for one day before today.
@@ -2424,6 +2425,7 @@ func TestBuildPortfolioWarningMessage_IncludesTriageSections(t *testing.T) {
 		"Distance to kill switch: 8.5% equity / 6.8% margin",
 		"Trend: WORSENING - equity dd +1.2% since last cycle; margin dd +0.8%",
 		"Top contributors:",
+		"```",
 		"hl-btc-sma-30",
 		"pos: short 0.5 BTC @ $67800 (-$140 unrealized)",
 		"Recent activity (last 15m):",
@@ -2436,6 +2438,47 @@ func TestBuildPortfolioWarningMessage_IncludesTriageSections(t *testing.T) {
 	}
 	if len(msg) >= 2000 {
 		t.Fatalf("warning message len = %d, want under Discord limit; msg:\n%s", len(msg), msg)
+	}
+}
+
+func TestBuildPortfolioWarningMessage_DailyPnLFallbackLabel(t *testing.T) {
+	now := time.Date(2026, 6, 6, 6, 5, 0, 0, time.UTC)
+	state := &AppState{
+		PortfolioRisk: PortfolioRiskState{
+			PeakValue:          1000,
+			CurrentDrawdownPct: 20,
+			WarningSent:        true,
+			WarnBandEnteredAt:  now.Add(-5 * time.Minute),
+		},
+		Strategies: map[string]*StrategyState{
+			"no-initial-cap": {
+				ID:              "no-initial-cap",
+				Cash:            900,
+				InitialCapital:  0,
+				RiskState:       RiskState{DailyPnL: -75, CurrentDrawdownPct: 7.5},
+				Positions:       map[string]*Position{},
+				OptionPositions: map[string]*OptionPosition{},
+			},
+		},
+	}
+	msg := BuildPortfolioWarningMessage(PortfolioWarningMessageInputs{
+		Config:     &PortfolioRiskConfig{MaxDrawdownPct: 25, WarnThresholdPct: 60},
+		State:      state,
+		TotalValue: 800,
+		Now:        now,
+	})
+	if !strings.Contains(msg, "daily P&L -$75") {
+		t.Fatalf("expected daily P&L fallback label in warning message:\n%s", msg)
+	}
+}
+
+func TestTruncateWarningField_UTF8Safe(t *testing.T) {
+	got := truncateWarningField("alpha-éclair", 9)
+	if !utf8.ValidString(got) {
+		t.Fatalf("truncateWarningField returned invalid UTF-8: %q", got)
+	}
+	if got != "alpha-..." {
+		t.Fatalf("truncateWarningField = %q, want %q", got, "alpha-...")
 	}
 }
 

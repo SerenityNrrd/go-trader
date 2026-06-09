@@ -28,6 +28,7 @@ type PortfolioWarningMessageInputs struct {
 
 type portfolioWarningContributor struct {
 	ID             string
+	PnLLabel       string
 	PnL            float64
 	DrawdownPct    float64
 	PositionLine   string
@@ -84,25 +85,22 @@ func BuildPortfolioWarningMessage(in PortfolioWarningMessageInputs) string {
 
 	if len(contribs) > 0 {
 		b.WriteString("\nTop contributors:\n")
-		for i, c := range contribs {
-			if i >= portfolioWarningMaxRows {
-				break
-			}
-			b.WriteString(fmt.Sprintf("  %-20s P&L %s  dd %.1f%%  %s\n",
-				truncateWarningField(c.ID, 20), formatSignedDollar(c.PnL), c.DrawdownPct, c.PositionLine))
+		b.WriteString("```\n")
+		for _, c := range contribs {
+			b.WriteString(fmt.Sprintf("%-20s %-9s %s  dd %.1f%%  %s\n",
+				truncateWarningField(c.ID, 20), c.PnLLabel, formatSignedDollar(c.PnL), c.DrawdownPct, c.PositionLine))
 		}
+		b.WriteString("```\n")
 	}
 
 	if len(in.Recent) > 0 {
 		b.WriteString("\nRecent activity (last 15m):\n")
-		for i, tr := range in.Recent {
-			if i >= portfolioWarningMaxRows {
-				break
-			}
-			b.WriteString("  ")
+		b.WriteString("```\n")
+		for _, tr := range in.Recent {
 			b.WriteString(formatPortfolioWarningTrade(tr))
 			b.WriteByte('\n')
 		}
+		b.WriteString("```\n")
 	}
 
 	if rec := portfolioWarningRecommendation(contribs); rec != "" {
@@ -112,10 +110,7 @@ func BuildPortfolioWarningMessage(in PortfolioWarningMessageInputs) string {
 	}
 
 	msg := strings.TrimRight(b.String(), "\n")
-	if len(msg) <= portfolioWarningMaxChars {
-		return msg
-	}
-	return msg[:portfolioWarningMaxChars-3] + "..."
+	return truncateWarningField(msg, portfolioWarningMaxChars)
 }
 
 func portfolioWarningContributors(state *AppState, prices map[string]float64) []portfolioWarningContributor {
@@ -136,8 +131,10 @@ func portfolioWarningContributors(state *AppState, prices map[string]float64) []
 		}
 		pv := PortfolioValue(ss, prices)
 		initCap := ss.InitialCapital
+		pnlLabel := "P&L"
 		if initCap <= 0 {
 			initCap = pv - ss.RiskState.DailyPnL
+			pnlLabel = "daily P&L"
 		}
 		pnl := pv - initCap
 		if pnl < 0 {
@@ -145,6 +142,7 @@ func portfolioWarningContributors(state *AppState, prices map[string]float64) []
 		}
 		out = append(out, portfolioWarningContributor{
 			ID:           id,
+			PnLLabel:     pnlLabel,
 			PnL:          pnl,
 			DrawdownPct:  ss.RiskState.CurrentDrawdownPct,
 			PositionLine: formatPortfolioWarningPosition(ss, prices),
@@ -327,11 +325,15 @@ func formatWarningPrice(v float64) string {
 }
 
 func truncateWarningField(s string, max int) string {
-	if len(s) <= max {
+	if max <= 0 {
+		return ""
+	}
+	runes := []rune(s)
+	if len(runes) <= max {
 		return s
 	}
 	if max <= 3 {
-		return s[:max]
+		return string(runes[:max])
 	}
-	return s[:max-3] + "..."
+	return string(runes[:max-3]) + "..."
 }
