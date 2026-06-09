@@ -560,7 +560,15 @@ func FormatCategorySummary(
 		})
 	}
 
-	totalPnl := filteredValue - totalInitCap
+	// For the TOTAL row, use the caller-supplied shared-wallet-adjusted value
+	// when one is provided (totalValue > 0). This prevents double-counting
+	// virtual cash in shared-wallet setups (#915). Per-strategy rows are
+	// unaffected — they use bot.value from the loop above.
+	totalRowValue := filteredValue
+	if totalValue > 0 {
+		totalRowValue = totalValue
+	}
+	totalPnl := totalRowValue - totalInitCap
 	totalPnlPct := 0.0
 	if totalInitCap > 0 {
 		totalPnlPct = (totalPnl / totalInitCap) * 100
@@ -569,7 +577,7 @@ func FormatCategorySummary(
 	// Render the strategy table in chunks of catTableMaxRows. The first chunk
 	// is appended to the in-message header; any extra chunks become standalone
 	// continuation messages so the table never overflows the 2000-char limit.
-	tableChunks := writeCatTableChunks(tableBots, filteredValue, totalPnl, totalPnlPct, hasSharedWallet)
+	tableChunks := writeCatTableChunks(tableBots, totalRowValue, totalPnl, totalPnlPct, hasSharedWallet)
 	if len(tableChunks) > 0 {
 		sb.WriteString(tableChunks[0])
 	}
