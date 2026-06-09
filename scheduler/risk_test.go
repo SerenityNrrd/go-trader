@@ -822,6 +822,9 @@ func TestCheckPortfolioRisk_WarningFires(t *testing.T) {
 	if !prs.WarningSent {
 		t.Error("expected WarningSent=true after warning fires")
 	}
+	if prs.WarnBandEnteredAt.IsZero() {
+		t.Error("expected WarnBandEnteredAt to be stamped after warning fires")
+	}
 
 	// Second call at same drawdown — warning should fire again so operators get
 	// a reminder each cycle while the account remains in the warning band.
@@ -831,6 +834,12 @@ func TestCheckPortfolioRisk_WarningFires(t *testing.T) {
 	}
 	if reason == "" {
 		t.Error("expected non-empty reason for repeated warning")
+	}
+	if prs.LastWarningEquityDDPct < 20.9 || prs.LastWarningEquityDDPct > 21.1 {
+		t.Errorf("LastWarningEquityDDPct = %.2f, want about 21", prs.LastWarningEquityDDPct)
+	}
+	if math.Abs(prs.WarningEquityDeltaPct) > 0.01 {
+		t.Errorf("WarningEquityDeltaPct = %.2f, want 0 for unchanged drawdown", prs.WarningEquityDeltaPct)
 	}
 }
 
@@ -908,6 +917,9 @@ func TestCheckPortfolioRisk_WarningResetOnRecovery(t *testing.T) {
 	CheckPortfolioRisk(prs, cfg, 8500.0, 0, 0, 0)
 	if prs.WarningSent {
 		t.Error("expected WarningSent=false after recovery below warn threshold")
+	}
+	if !prs.WarnBandEnteredAt.IsZero() {
+		t.Error("expected WarnBandEnteredAt reset after recovery below warn threshold")
 	}
 
 	// Cross warning threshold again — should warn again.
@@ -2353,6 +2365,77 @@ func TestCheckPortfolioRisk_BothSignalsBreachWarn_ReasonIncludesBoth(t *testing.
 	}
 	if !strings.Contains(reason, "equity=") || !strings.Contains(reason, "margin=") {
 		t.Errorf("expected reason to mention both equity= and margin=; got %q", reason)
+	}
+}
+
+func TestBuildPortfolioWarningMessage_IncludesTriageSections(t *testing.T) {
+	now := time.Date(2026, 6, 6, 6, 5, 0, 0, time.UTC)
+	state := &AppState{
+		PortfolioRisk: PortfolioRiskState{
+			PeakValue:                10060,
+			CurrentDrawdownPct:       16.5,
+			CurrentMarginDrawdownPct: 18.2,
+			WarningSent:              true,
+			WarnBandEnteredAt:        now.Add(-18 * time.Minute),
+			WarningEquityDeltaPct:    1.2,
+			WarningMarginDeltaPct:    0.8,
+		},
+		Strategies: map[string]*StrategyState{
+			"hl-btc-sma-30": {
+				ID:             "hl-btc-sma-30",
+				Type:           "perps",
+				Cash:           1000,
+				InitialCapital: 1500,
+				RiskState:      RiskState{CurrentDrawdownPct: 9.1},
+				Positions: map[string]*Position{
+					"BTC": {Symbol: "BTC", Quantity: 0.5, AvgCost: 67800, Side: "short", Multiplier: 1},
+				},
+				OptionPositions: map[string]*OptionPosition{},
+			},
+			"hl-eth-ema-30": {
+				ID:              "hl-eth-ema-30",
+				Type:            "perps",
+				Cash:            905,
+				InitialCapital:  1000,
+				RiskState:       RiskState{CurrentDrawdownPct: 4.1},
+				Positions:       map[string]*Position{},
+				OptionPositions: map[string]*OptionPosition{},
+			},
+		},
+	}
+	msg := BuildPortfolioWarningMessage(PortfolioWarningMessageInputs{
+		Config:      &PortfolioRiskConfig{MaxDrawdownPct: 25, WarnThresholdPct: 60},
+		State:       state,
+		Prices:      map[string]float64{"BTC": 68080},
+		TotalValue:  8400,
+		PerpsLoss:   250,
+		PerpsMargin: 1500,
+		Recent: []Trade{
+			{Timestamp: now.Add(-14 * time.Minute), StrategyID: "hl-btc-sma-30", Symbol: "BTC", Side: "sell", Quantity: 0.5, Price: 67800, TradeType: "perps", Details: "signal flip"},
+		},
+		Now: now,
+	})
+
+	for _, want := range []string{
+		"**PORTFOLIO WARNING**",
+		"Kill switch: 25.0% drawdown | Warn threshold: 15.0%",
+		"In band since: 2026-06-06 05:47 UTC (18m)",
+		"Current: equity=16.5% ($8400 / peak $10060) | perps margin=18.2% ($250 loss on $1500 margin)",
+		"Distance to kill switch: 8.5% equity / 6.8% margin",
+		"Trend: WORSENING - equity dd +1.2% since last cycle; margin dd +0.8%",
+		"Top contributors:",
+		"hl-btc-sma-30",
+		"pos: short 0.5 BTC @ $67800 (-$140 unrealized)",
+		"Recent activity (last 15m):",
+		"05:51  perps  hl-btc-sma-30",
+		"Recommended:",
+	} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("warning message missing %q:\n%s", want, msg)
+		}
+	}
+	if len(msg) >= 2000 {
+		t.Fatalf("warning message len = %d, want under Discord limit; msg:\n%s", len(msg), msg)
 	}
 }
 
