@@ -745,14 +745,22 @@ func main() {
 		// Process only due strategies
 		if saveFailures >= 3 {
 			fmt.Println("[CRITICAL] State save failed 3x, skipping trades this cycle")
+			// #879: the fan-out below is skipped, so clear the regime store —
+			// /api/regime must not keep serving the prior cycle's labels as
+			// fake-live while trading is suspended.
+			globalRegimeStore.resetForCycle(time.Now().UTC())
 		} else {
-			// #879: build the per-cycle global regime store BEFORE the check
-			// fan-out — one regime subprocess per distinct (platform, symbol,
-			// timeframe, spec) signature among due strategies. Every regime
-			// consumer this cycle (entry gates, stratState sync, stamp-at-open,
-			// check-script injection, flat manual, options, dashboard) reads
-			// this map; check scripts no longer compute regime inline.
-			populateRegimeStore(globalRegimeStore, dueStrategies, cfg.Regime, notifier)
+			// #879: kick off the per-cycle global regime store — one regime
+			// subprocess per distinct (platform, symbol, timeframe, spec)
+			// signature among due strategies. Runs CONCURRENTLY with the
+			// portfolio risk / kill-switch phase below so a regime hang can
+			// never delay risk management; regimeStoreReady() blocks (with a
+			// phase budget) right before the check fan-out, the first store
+			// consumer. Every regime consumer this cycle (entry gates,
+			// stratState sync, stamp-at-open, check-script injection, flat
+			// manual, options, dashboard) reads this map; check scripts no
+			// longer compute regime inline.
+			regimeStoreReady := startRegimeStorePopulation(globalRegimeStore, dueStrategies, cfg.Regime, notifier)
 			// #42 / #243: Portfolio-level risk check before running any strategy.
 			//
 			// Fetch live Hyperliquid clearinghouseState ONCE per cycle (outside
@@ -1281,6 +1289,10 @@ func main() {
 					}
 				}
 
+				// #879: the dispatch loop below is the first regime-store
+				// consumer — wait (bounded by regimeStorePhaseBudget) for the
+				// population kicked off before the risk phase.
+				regimeStoreReady()
 				for _, sc := range dueStrategies {
 					stratState := state.Strategies[sc.ID]
 					if stratState == nil {
@@ -1908,6 +1920,11 @@ func main() {
 						// close-eval's check output — so a FLAT manual strategy now
 						// shows a live regime too (pre-#879 the HL check only ran
 						// with an open position, leaving regime=- while flat).
+						// If the bundle failed on the very cycle a manual position
+						// opened, the stamp below is an empty no-op and regime-keyed
+						// closes stay unarmed until a later cycle's bundle succeeds —
+						// the stamp is idempotent on pos.Regime == "", so it
+						// self-heals (documented fail-open tradeoff).
 						manualRegime := globalRegimeStore.PayloadForStrategy(sc, cfg.Regime)
 						if manualOK {
 							mu.Lock()

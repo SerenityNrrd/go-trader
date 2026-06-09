@@ -255,6 +255,64 @@ func TestPopulateRegimeStoreClearsPriorCycle(t *testing.T) {
 	}
 }
 
+func TestRegimeStoreSetAfterSealDiscards(t *testing.T) {
+	store := &RegimeStore{}
+	store.resetForCycle(time.Now().UTC())
+	key := regimeBundleKey{Platform: "hyperliquid", Symbol: "BTC", Timeframe: "1h"}
+	if kept := store.seal(); kept != 0 {
+		t.Fatalf("seal kept = %d", kept)
+	}
+	store.set(&RegimeBundle{Key: key, Payload: RegimePayload{Legacy: "trending_up"}})
+	if _, ok := store.get(key); ok {
+		t.Error("a sealed store must discard late bundles (no mid-cycle flips)")
+	}
+	// A new cycle unseals.
+	store.resetForCycle(time.Now().UTC())
+	store.set(&RegimeBundle{Key: key, Payload: RegimePayload{Legacy: "trending_up"}})
+	if _, ok := store.get(key); !ok {
+		t.Error("resetForCycle must clear the seal")
+	}
+}
+
+func TestRegimeStorePhaseBudgetSealsStragglers(t *testing.T) {
+	// A hanging signature must not stall the cycle past the phase budget, and
+	// its late result must be discarded — the signature fails open this cycle
+	// instead of flipping mid-fan-out.
+	origBudget := regimeStorePhaseBudget
+	regimeStorePhaseBudget = 50 * time.Millisecond
+	t.Cleanup(func() { regimeStorePhaseBudget = origBudget })
+
+	rc := testRegimeConfig()
+	fast := StrategyConfig{ID: "hl-btc", Type: "perps", Platform: "hyperliquid", Args: []string{"momentum", "BTC", "1h"}}
+	slow := StrategyConfig{ID: "hl-eth", Type: "perps", Platform: "hyperliquid", Args: []string{"momentum", "ETH", "1h"}}
+	release := make(chan struct{})
+	stubRegimeBundleCheck(t, func(req regimeBundleRequest) (*RegimeBundle, error) {
+		if req.Key.Symbol == "ETH" {
+			<-release // hung subprocess
+		}
+		return &RegimeBundle{Key: req.Key, Payload: RegimePayload{Legacy: "trending_up"}, RawRegimeJSON: `"trending_up"`, At: time.Now().UTC()}, nil
+	})
+
+	store := &RegimeStore{}
+	wait := startRegimeStorePopulation(store, []StrategyConfig{fast, slow}, rc, nil)
+	start := time.Now()
+	wait()
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("wait exceeded the phase budget by far: %s", elapsed)
+	}
+	if store.PayloadForStrategy(fast, rc).IsEmpty() {
+		t.Error("fast signature should have landed before the budget expired")
+	}
+	if !store.PayloadForStrategy(slow, rc).IsEmpty() {
+		t.Error("hung signature must fail open this cycle")
+	}
+	close(release) // straggler completes after the seal
+	time.Sleep(100 * time.Millisecond)
+	if !store.PayloadForStrategy(slow, rc).IsEmpty() {
+		t.Error("straggler result after seal must be discarded, not applied mid-cycle")
+	}
+}
+
 func TestRegimeBundleCheckArgs(t *testing.T) {
 	req := regimeBundleRequest{
 		Key:        regimeBundleKey{Platform: "hyperliquid", Symbol: "BTC", Timeframe: "1h", SpecJSON: `{"default":{"period":14}}`},

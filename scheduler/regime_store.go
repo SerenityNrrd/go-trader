@@ -107,14 +107,24 @@ type regimeBundleOutput struct {
 	Error     string                       `json:"error"`
 }
 
+// regimeStorePhaseBudget caps the wall-clock the main loop will wait for the
+// regime-population phase before proceeding with whatever bundles landed.
+// One full subprocess timeout wave plus headroom: without a cap, a storm of
+// N distinct hanging signatures would serialize to ceil(N/4)×scriptTimeout
+// ahead of the check fan-out. Var (not const) so tests can shrink it.
+var regimeStorePhaseBudget = scriptTimeout + 15*time.Second
+
 // RegimeStore is the two-layer global store, rebuilt empty every cycle.
-// Guarded by its own mutex: writes happen on the main loop goroutine before
-// the check fan-out; reads come from the same goroutine plus the dashboard
-// HTTP handlers.
+// Guarded by its own mutex: writes happen on the population goroutines before
+// the check fan-out; reads come from the main loop plus the dashboard HTTP
+// handlers. Once sealed (phase budget exceeded), straggler results are
+// discarded so every strategy in the cycle reads the same — possibly empty,
+// fail-open — view instead of a mid-cycle mix.
 type RegimeStore struct {
 	mu      sync.RWMutex
 	entries map[regimeBundleKey]*RegimeBundle
 	builtAt time.Time
+	sealed  bool
 }
 
 // globalRegimeStore is the process-wide store. Package-level (like the other
@@ -128,6 +138,7 @@ func (s *RegimeStore) resetForCycle(now time.Time) {
 	defer s.mu.Unlock()
 	s.entries = make(map[regimeBundleKey]*RegimeBundle)
 	s.builtAt = now
+	s.sealed = false
 }
 
 func (s *RegimeStore) set(b *RegimeBundle) {
@@ -136,10 +147,25 @@ func (s *RegimeStore) set(b *RegimeBundle) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.sealed {
+		// Phase budget already expired: the cycle is consuming the store, so
+		// a late bundle must not flip a signature mid-cycle. Dropped, not
+		// deferred — the next cycle recomputes from scratch anyway.
+		return
+	}
 	if s.entries == nil {
 		s.entries = make(map[regimeBundleKey]*RegimeBundle)
 	}
 	s.entries[b.Key] = b
+}
+
+// seal freezes the store for the remainder of the cycle and reports how many
+// bundles made it in before the phase budget expired.
+func (s *RegimeStore) seal() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.sealed = true
+	return len(s.entries)
 }
 
 func (s *RegimeStore) get(key regimeBundleKey) (*RegimeBundle, bool) {
@@ -393,38 +419,75 @@ func regimeBundleAlertConfig(key regimeBundleKey) StrategyConfig {
 	}
 }
 
-// populateRegimeStore rebuilds the global store for this cycle: clear, union
-// due-strategy signatures, one subprocess per distinct signature (parallel;
-// pythonSemaphore caps concurrency at 4), project entries. Runs on the main
-// loop goroutine BEFORE the per-strategy check fan-out, without holding the
-// state mutex. A failed signature leaves NO entry — consumers see an empty
-// payload and fail open (issue #879 failure policy b).
-func populateRegimeStore(store *RegimeStore, due []StrategyConfig, rc *RegimeConfig, notifier *MultiNotifier) {
+// startRegimeStorePopulation rebuilds the global store for this cycle: clear,
+// union due-strategy signatures, one subprocess per distinct signature
+// (parallel; pythonSemaphore caps concurrency at 4). It kicks the work off on
+// a background goroutine and returns a wait func, so the main loop can run
+// the once-per-cycle portfolio risk / kill-switch phase CONCURRENTLY and a
+// regime hang can never delay risk management — call the wait func right
+// before the per-strategy check fan-out (the first store consumer).
+//
+// The wait func blocks until population completes or regimeStorePhaseBudget
+// elapses; on budget exhaustion the store is sealed — straggler subprocesses
+// keep their semaphore slots until their own scriptTimeout fires, but their
+// results are discarded and the affected signatures fail open this cycle.
+//
+// A failed signature leaves NO entry — consumers see an empty payload and
+// fail open (issue #879 failure policy b). Failure/recovery alerts fire
+// sequentially after the parallel wave: MultiNotifier's other callers are all
+// on the sequential main loop, so the populate goroutines must not fan sends
+// out concurrently.
+func startRegimeStorePopulation(store *RegimeStore, due []StrategyConfig, rc *RegimeConfig, notifier *MultiNotifier) func() {
 	store.resetForCycle(time.Now().UTC())
 	reqs := collectRegimeBundleRequests(due, rc)
 	if len(reqs) == 0 {
-		return
+		return func() {}
 	}
-	var wg sync.WaitGroup
-	for _, req := range reqs {
-		req := req
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			bundle, err := runRegimeBundleCheckFn(req)
-			if err != nil {
-				fmt.Printf("[WARN] regime store: %v\n", err)
-				notifyScriptFailure(notifier, regimeBundleAlertConfig(req.Key), scriptFailureError, err.Error())
-				return
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		errs := make([]error, len(reqs))
+		var wg sync.WaitGroup
+		for i, req := range reqs {
+			i, req := i, req
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				bundle, err := runRegimeBundleCheckFn(req)
+				if err != nil {
+					errs[i] = err
+					return
+				}
+				store.set(bundle)
+			}()
+		}
+		wg.Wait()
+		for i, req := range reqs {
+			if errs[i] != nil {
+				fmt.Printf("[WARN] regime store: %v\n", errs[i])
+				notifyScriptFailure(notifier, regimeBundleAlertConfig(req.Key), scriptFailureError, errs[i].Error())
+			} else {
+				clearScriptFailure(notifier, regimeBundleAlertConfig(req.Key))
 			}
-			store.set(bundle)
-			clearScriptFailure(notifier, regimeBundleAlertConfig(req.Key))
-		}()
+		}
+	}()
+	return func() {
+		select {
+		case <-done:
+		case <-time.After(regimeStorePhaseBudget):
+			kept := store.seal()
+			fmt.Printf("[WARN] regime store: phase budget %s exceeded; sealed with %d/%d bundles — missing signatures fail open this cycle\n",
+				regimeStorePhaseBudget, kept, len(reqs))
+		}
+		if summary := regimeStoreSummary(store); summary != "" {
+			fmt.Printf("Regime: %s\n", summary)
+		}
 	}
-	wg.Wait()
-	if summary := regimeStoreSummary(store); summary != "" {
-		fmt.Printf("Regime: %s\n", summary)
-	}
+}
+
+// populateRegimeStore is the synchronous form (tests, single-shot callers).
+func populateRegimeStore(store *RegimeStore, due []StrategyConfig, rc *RegimeConfig, notifier *MultiNotifier) {
+	startRegimeStorePopulation(store, due, rc, notifier)()
 }
 
 // regimeStoreSummary renders one line of primary labels for the cycle log,
