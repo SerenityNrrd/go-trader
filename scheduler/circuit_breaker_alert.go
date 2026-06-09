@@ -324,9 +324,6 @@ func circuitBreakerAsset(sc StrategyConfig) string {
 	if sc.Symbol != "" {
 		return sc.Symbol
 	}
-	if len(sc.Args) > 1 {
-		return sc.Args[1]
-	}
 	return extractAsset(sc)
 }
 

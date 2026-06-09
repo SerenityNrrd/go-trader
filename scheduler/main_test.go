@@ -120,7 +120,7 @@ func TestNotifyPerStrategyCircuitBreaker_BroadcastsFreshTriggers(t *testing.T) {
 					!strings.Contains(msg, "[test-strategy]") ||
 					!strings.Contains(msg, "Trigger:") ||
 					!strings.Contains(msg, "Portfolio impact:") ||
-					!strings.Contains(msg, "BinanceUS, BTC/USDT, 30m, sma_cross, spot") {
+					!strings.Contains(msg, "BinanceUS, BTC, 30m, sma_cross, spot") {
 					t.Fatalf("notification missing required context: %q", msg)
 				}
 				if tc.reason == RiskReasonConsecutiveLosses && !strings.Contains(msg, "5 consecutive losses") {

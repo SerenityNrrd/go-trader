@@ -742,6 +742,9 @@ func main() {
 			fmt.Println()
 		}
 
+		totalPV := 0.0
+		sharedWallets := detectSharedWallets(cfg.Strategies)
+
 		// Process only due strategies
 		if saveFailures >= 3 {
 			fmt.Println("[CRITICAL] State save failed 3x, skipping trades this cycle")
@@ -749,6 +752,9 @@ func main() {
 			// /api/regime must not keep serving the prior cycle's labels as
 			// fake-live while trading is suspended.
 			globalRegimeStore.resetForCycle(time.Now().UTC())
+			mu.RLock()
+			totalPV, _ = computeTotalPortfolioValue(cfg.Strategies, state, prices, nil, sharedWallets)
+			mu.RUnlock()
 		} else {
 			// #879: kick off the per-cycle global regime store — one regime
 			// subprocess per distinct (platform, symbol, timeframe, spec)
@@ -772,6 +778,7 @@ func main() {
 			// perps strategies on the same account don't get double-counted.
 			killSwitchFired := false
 			notionalBlocked := false
+			usedPVFallback := false
 
 			// Partition HL live strategies up-front: shared-wallet detection
 			// must see all strategies in cfg, while position sync only touches
@@ -851,7 +858,6 @@ func main() {
 				}
 			}
 
-			sharedWallets := detectSharedWallets(cfg.Strategies)
 			hlAddr := os.Getenv("HYPERLIQUID_ACCOUNT_ADDRESS")
 			hlKey := SharedWalletKey{Platform: "hyperliquid", Account: hlAddr}
 			_, hlShared := sharedWallets[hlKey]
@@ -927,7 +933,7 @@ func main() {
 			}
 
 			mu.RLock()
-			totalPV, usedPVFallback := computeTotalPortfolioValue(cfg.Strategies, state, prices, walletBalances, sharedWallets)
+			totalPV, usedPVFallback = computeTotalPortfolioValue(cfg.Strategies, state, prices, walletBalances, sharedWallets)
 			totalNotional := PortfolioNotional(state.Strategies, prices)
 			// #296: aggregate perps margin drawdown inputs alongside the
 			// equity total so the portfolio kill switch can fire on a
@@ -2134,16 +2140,16 @@ func main() {
 			} // end if !killSwitchFired
 		}
 
-		// Calculate total portfolio value and per-channel values/strategies.
+		// Calculate per-channel values/strategies. totalPV above already uses
+		// shared-wallet-aware aggregation; summing per-strategy PV here would
+		// double-count live strategies sharing one exchange account.
 		// Group by logical channel key (platform or type) so summaries work with any backend.
 		mu.RLock()
-		totalValue := 0.0
 		channelValue := make(map[string]float64)
 		channelStrats := make(map[string][]StrategyConfig)
 		for _, sc := range cfg.Strategies {
 			if s, ok := state.Strategies[sc.ID]; ok {
 				pv := PortfolioValue(s, prices)
-				totalValue += pv
 				if chKey := notifier.resolveChannelKey(sc.Platform, sc.Type); chKey != "" {
 					channelValue[chKey] += pv
 					channelStrats[chKey] = append(channelStrats[chKey], sc)
@@ -2153,7 +2159,7 @@ func main() {
 		mu.RUnlock()
 
 		elapsed := time.Since(cycleStart)
-		logMgr.LogSummary(cycle, elapsed, len(dueStrategies), totalTrades, totalValue)
+		logMgr.LogSummary(cycle, elapsed, len(dueStrategies), totalTrades, totalPV)
 
 		// Pre-compute closed-position history once per cycle so per-channel /
 		// per-asset Sharpe calls (and the later ComputeSharpeByStrategy for

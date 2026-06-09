@@ -2678,3 +2678,19 @@ func TestCircuitBreakerStrategyLabel_SkipsFlagTimeframe(t *testing.T) {
 		}
 	}
 }
+
+func TestCircuitBreakerStrategyLabel_StripsSpotQuoteSuffix(t *testing.T) {
+	sc := StrategyConfig{
+		ID:       "spot-btc",
+		Type:     "spot",
+		Platform: "binanceus",
+		Args:     []string{"sma_cross", "BTC/USDT", "30m"},
+	}
+	got := circuitBreakerStrategyLabel(sc)
+	if !strings.Contains(got, "BinanceUS, BTC, 30m, sma_cross, spot") {
+		t.Fatalf("strategy label = %q, want normalized BTC asset", got)
+	}
+	if strings.Contains(got, "BTC/USDT") {
+		t.Fatalf("strategy label should not render raw spot pair: %q", got)
+	}
+}
