@@ -185,9 +185,10 @@ func writeLeaderboardHeaderPrices(sb *strings.Builder, entries []LeaderboardEntr
 // leaderboardAdjustedTotal returns the shared-wallet-adjusted portfolio value
 // for a set of leaderboard entries. Entries whose strategy configs cannot be
 // found in configByID contribute their e.Value directly (no dedup).
-// Returns 0 when no wallet dedup can be performed (e.g. nil configByID) so
-// the caller can detect "no adjustment available" and fall through to the
-// naive sum.
+// Returns -1 (the "no adjustment available" sentinel — a portfolio value is
+// never negative) when no wallet dedup can be performed (e.g. nil configByID)
+// so the caller falls through to the naive sum. A real adjusted value of $0
+// (drained shared wallet) is returned as 0 and used as-is.
 func leaderboardAdjustedTotal(
 	entries []LeaderboardEntry,
 	configByID map[string]StrategyConfig,
@@ -197,7 +198,7 @@ func leaderboardAdjustedTotal(
 	accountShared map[SharedWalletKey][]string,
 ) float64 {
 	if len(configByID) == 0 || len(entries) == 0 {
-		return 0
+		return -1
 	}
 	var subset []StrategyConfig
 	for _, e := range entries {
@@ -206,7 +207,7 @@ func leaderboardAdjustedTotal(
 		}
 	}
 	if len(subset) == 0 {
-		return 0
+		return -1
 	}
 	adj, _ := computeSubsetPortfolioValue(subset, state, prices, walletBalances, accountShared)
 	return adj
@@ -246,8 +247,13 @@ func formatLeaderboardMessage(icon, title string, entries []LeaderboardEntry, sh
 	// Use the caller-supplied shared-wallet-adjusted total when available so
 	// the TOTAL row doesn't double-count virtual cash in shared-wallet setups
 	// (#915). Per-strategy rows above are unaffected.
+	//
+	// Sentinel: a negative adjustedTotal means "no adjustment available" (fall
+	// back to the naive Σ e.Value). A portfolio value is never negative, so a
+	// legitimately drained shared wallet (real balance $0) displays $0 instead
+	// of being mistaken for "unset" (#917 review item 3).
 	totalDisplayValue := totalValue
-	if adjustedTotal > 0 {
+	if adjustedTotal >= 0 {
 		totalDisplayValue = adjustedTotal
 	}
 	totalPnl := totalDisplayValue - totalCapital

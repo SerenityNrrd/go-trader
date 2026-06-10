@@ -561,11 +561,16 @@ func FormatCategorySummary(
 	}
 
 	// For the TOTAL row, use the caller-supplied shared-wallet-adjusted value
-	// when one is provided (totalValue > 0). This prevents double-counting
-	// virtual cash in shared-wallet setups (#915). Per-strategy rows are
-	// unaffected — they use bot.value from the loop above.
+	// when one is provided. This prevents double-counting virtual cash in
+	// shared-wallet setups (#915). Per-strategy rows are unaffected — they use
+	// bot.value from the loop above.
+	//
+	// Sentinel: a negative totalValue means "no adjustment available" (fall back
+	// to the naive sum). A portfolio value is never negative, so this lets a
+	// legitimately drained shared wallet display $0 instead of being mistaken
+	// for "unset" and falling back to the inflated naive sum (#917 review item 3).
 	totalRowValue := filteredValue
-	if totalValue > 0 {
+	if totalValue >= 0 {
 		totalRowValue = totalValue
 	}
 	totalPnl := totalRowValue - totalInitCap

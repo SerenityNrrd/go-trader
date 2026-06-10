@@ -741,7 +741,7 @@ func TestFormatCategorySummary_MaxDrawdownColumn_SharedWallet(t *testing.T) {
 	}
 	prices := map[string]float64{"ETH/USDT": 3000}
 
-	msgs := FormatCategorySummary(1, 0, 2, 0, 0, prices, nil, strats, state, "hyperliquid", "ETH", 600, 0, nil, nil)
+	msgs := FormatCategorySummary(1, 0, 2, 0, -1, prices, nil, strats, state, "hyperliquid", "ETH", 600, 0, nil, nil)
 	msg := strings.Join(msgs, "\n")
 	lines := strings.Split(msg, "\n")
 	var headerLine, totalLine string
@@ -850,7 +850,7 @@ func TestFormatCategorySummary_ClosedTradesColumn_SharedWallet(t *testing.T) {
 		"hl-tema-eth": {PositionsOpened: 9},
 	}
 
-	msgs := FormatCategorySummary(1, 0, 2, 0, 0, prices, nil, strats, state, "hyperliquid", "ETH", 600, 0, lifetime, nil)
+	msgs := FormatCategorySummary(1, 0, 2, 0, -1, prices, nil, strats, state, "hyperliquid", "ETH", 600, 0, lifetime, nil)
 	msg := strings.Join(msgs, "\n")
 
 	if !strings.Contains(msg, "#T") {
@@ -982,7 +982,7 @@ func TestFormatCategorySummary_SharedWallet(t *testing.T) {
 	}
 	prices := map[string]float64{"ETH/USDT": 3000}
 
-	msgs := FormatCategorySummary(1, 0, 2, 0, 0, prices, nil, strats, state, "hyperliquid", "ETH", 600, 0, nil, nil)
+	msgs := FormatCategorySummary(1, 0, 2, 0, -1, prices, nil, strats, state, "hyperliquid", "ETH", 600, 0, nil, nil)
 	msg := strings.Join(msgs, "\n")
 
 	// Should contain Wallet% column
@@ -1038,7 +1038,7 @@ func TestFormatCategorySummary_WalletPctFromConfig(t *testing.T) {
 	}
 	prices := map[string]float64{"ETH/USDT": 3000}
 
-	msgs := FormatCategorySummary(1, 0, 2, 0, 0, prices, nil, strats, state, "hyperliquid", "ETH", 600, 0, nil, nil)
+	msgs := FormatCategorySummary(1, 0, 2, 0, -1, prices, nil, strats, state, "hyperliquid", "ETH", 600, 0, nil, nil)
 	msg := strings.Join(msgs, "\n")
 
 	if !strings.Contains(msg, "30.0%") {
@@ -1063,7 +1063,7 @@ func TestFormatCategorySummary_NoSharedWallet(t *testing.T) {
 	}
 	prices := map[string]float64{"ETH/USDT": 3000}
 
-	msgs := FormatCategorySummary(1, 0, 2, 0, 0, prices, nil, strats, state, "hyperliquid", "ETH", 600, 0, nil, nil)
+	msgs := FormatCategorySummary(1, 0, 2, 0, -1, prices, nil, strats, state, "hyperliquid", "ETH", 600, 0, nil, nil)
 	msg := strings.Join(msgs, "\n")
 
 	if strings.Contains(msg, "Wallet%") {
@@ -2935,10 +2935,12 @@ func TestFormatCategorySummary_AdjustedTotalOverridesNaiveSum(t *testing.T) {
 	}
 }
 
-// TestFormatCategorySummary_ZeroAdjustedTotalFallsBackToNaiveSum verifies that
-// passing totalValue=0 preserves the original naive-sum behavior (backward
-// compatibility for non-shared-wallet callers).
-func TestFormatCategorySummary_ZeroAdjustedTotalFallsBackToNaiveSum(t *testing.T) {
+// TestFormatCategorySummary_NegativeAdjustedTotalFallsBackToNaiveSum verifies
+// that the negative "no adjustment available" sentinel preserves the original
+// naive-sum behavior (non-shared-wallet callers), while a real adjusted value
+// of $0 (drained shared wallet) is shown as-is rather than triggering the
+// fallback (#917 review item 3).
+func TestFormatCategorySummary_NegativeAdjustedTotalFallsBackToNaiveSum(t *testing.T) {
 	strats := []StrategyConfig{
 		{ID: "spot-btc", Type: "spot", Capital: 3000, Args: []string{"sma", "BTC", "1h"}},
 		{ID: "spot-eth", Type: "spot", Capital: 2000, Args: []string{"rsi", "ETH", "1h"}},
@@ -2951,21 +2953,33 @@ func TestFormatCategorySummary_ZeroAdjustedTotalFallsBackToNaiveSum(t *testing.T
 	}
 	prices := map[string]float64{}
 
-	// Pass 0 → should fall back to filteredValue (3000+2000=5000).
-	msgs := FormatCategorySummary(1, 0, 2, 0, 0, prices, nil, strats, state, "spot", "", 600, 0, nil, nil)
-	msg := strings.Join(msgs, "\n")
-
-	var totalLine string
-	for _, line := range strings.Split(msg, "\n") {
-		if strings.HasPrefix(line, "TOTAL") {
-			totalLine = line
-			break
+	totalLineOf := func(msgs []string) string {
+		for _, line := range strings.Split(strings.Join(msgs, "\n"), "\n") {
+			if strings.HasPrefix(line, "TOTAL") {
+				return line
+			}
 		}
+		return ""
 	}
-	if totalLine == "" {
-		t.Fatalf("no TOTAL row found in:\n%s", msg)
+
+	// Negative sentinel → fall back to filteredValue (3000+2000=5000).
+	fallbackLine := totalLineOf(FormatCategorySummary(1, 0, 2, 0, -1, prices, nil, strats, state, "spot", "", 600, 0, nil, nil))
+	if fallbackLine == "" {
+		t.Fatal("no TOTAL row found for negative-sentinel case")
 	}
-	if !strings.Contains(totalLine, "5,000") {
-		t.Errorf("TOTAL row should fall back to naive sum $5,000 when totalValue=0; got: %q", totalLine)
+	if !strings.Contains(fallbackLine, "5,000") {
+		t.Errorf("TOTAL row should fall back to naive sum $5,000 when totalValue<0; got: %q", fallbackLine)
+	}
+
+	// Explicit $0 adjustment (drained shared wallet) → TOTAL Value column shows
+	// $0, NOT the inflated naive sum. The Init column legitimately shows $5,000
+	// (sum of starting capital), so distinguish by PnL%: Value=0 vs Init=5000
+	// gives -100.0%; the naive fallback (Value=5000) would give 0.0%.
+	drainedLine := totalLineOf(FormatCategorySummary(1, 0, 2, 0, 0, prices, nil, strats, state, "spot", "", 600, 0, nil, nil))
+	if drainedLine == "" {
+		t.Fatal("no TOTAL row found for $0-adjustment case")
+	}
+	if !strings.Contains(drainedLine, "-100.0%") {
+		t.Errorf("TOTAL row should show drained $0 (PnL%% -100.0%%), not the naive $5,000; got: %q", drainedLine)
 	}
 }
