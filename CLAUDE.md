@@ -89,8 +89,11 @@ The posted comment is written as instructions for an agent to act on, and contai
 - First line is a verdict: exactly `LGTM` **or** `Needs Updates`.
 - `LGTM` stands alone with no explanation — given **only** when there are zero findings in every category. It signals the reading agent may merge and close the PR.
 - When findings exist, the first line is `Needs Updates`, then every finding goes under exactly one H3 section (omit empty sections): `### Needs Fixing`, `### Recommended Optional`, `### Create Follow-up Issue`, `### Requires Human Review`.
-- Each section is a numbered list; each item is a single **bold one-sentence title** stating the item, then a newline, then a description with only the critical details (`file:line` + why it matters). `### Requires Human Review` items keep the description concise (under 50 words) and end with a clear recommendation (what you'd do / what the human should decide).
+- Each section is a numbered list; each item is a single **bold one-sentence title** stating the item, then a newline, then a description with only the critical details (`file:line` + why it matters). `### Needs Fixing` and `### Recommended Optional` items also add **Invariant:** (one sentence — the general property violated, independent of the example) and **Must survive:** (1–3 adversarial cases any fix must handle: compound states, inverse scenario, boundary). `### Requires Human Review` items keep the description concise (under 50 words) and end with a clear recommendation (what you'd do / what the human should decide).
 Inline review threads are exempt.
+
+### Addressing review findings
+Before implementing `@claude review` findings: restate each item as an invariant, enumerate states that would break the proposed fix (especially the inverse of the reported scenario and compound/concurrent cases), and add tests for that class — not only the reported example — before pushing.
 
 ## Build & Deploy
 - **Update:** `bash scripts/update.sh --restart` — atomic: preflight → `pull --ff-only` (or `--rsync-from <src>`, won't clobber `.git/`/config/state DB/venv/binary) → `uv sync` → build → probe → swap (`.prev`) → restart+verify → rollback on timeout. Env `STATUS_PORT`/`ACTIVE_TIMEOUT=30s`/`HEALTH_TIMEOUT=60s`. **Never rebuild Go alone — argv contract requires both sides (Go+Python) at same SHA.** Restart `--restart-mode systemd` (default; falls back to signal) / `signal` (`GO_TRADER_PIDFILE`/`GO_TRADER_RUN_SH`). Batch `--all --restart`.
