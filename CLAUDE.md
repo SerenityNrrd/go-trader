@@ -89,7 +89,7 @@ The posted comment is written as instructions for an agent to act on, and contai
 - First line is a verdict: exactly `LGTM` **or** `Needs Updates`.
 - `LGTM` stands alone with no explanation — given **only** when there are zero findings in every category. It signals the reading agent may merge and close the PR.
 - When findings exist, the first line is `Needs Updates`, then every finding goes under exactly one H3 section (omit empty sections): `### Needs Fixing`, `### Recommended Optional`, `### Create Follow-up Issue`, `### Requires Human Review`.
-- Each section is a numbered list; each item is a single **bold one-sentence title** stating the item, then a newline, then a description with only the critical details (`file:line` + why it matters).
+- Each section is a numbered list; each item is a single **bold one-sentence title** stating the item, then a newline, then a description with only the critical details (`file:line` + why it matters). `### Requires Human Review` items keep the description concise (under 50 words) and end with a clear recommendation (what you'd do / what the human should decide).
 Inline review threads are exempt.
 
 ## Build & Deploy
