@@ -290,9 +290,10 @@ func classifyRegimeDivergence(shortLabel, mediumLabel string, shortReturnEff, me
 		return result
 	}
 
-	// At least one is different. Determine hard vs soft.
+	// Biases differ. Determine hard vs soft.
 	// Hard: biases are strictly opposite (one bullish, one bearish).
-	// Soft: one neutral and the other directional, or same class but different sub-label.
+	// Soft: one neutral and the other directional. (Same-bias sub-label
+	// differences early-return as none above, so they never reach here.)
 	if shortBias != biasNeutral && mediumBias != biasNeutral {
 		result.Kind = DivergenceHard
 	} else {

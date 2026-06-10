@@ -331,6 +331,19 @@ func validateStrategyRegimeVocabulary(cfg *Config) []string {
 						errs = append(errs, fmt.Sprintf("%s: regime_window_divergence.%s=%q not found in regime.windows (valid: %s)", prefix, pair.field, pair.value, strings.Join(sortedRegimeWindowNamesFromConfig(rc.Windows), ", ")))
 					}
 				}
+				// #907/PR#916: louder stand-aside foot-gun warning. A mutating mode
+				// (trust_short/trust_medium) on a non-"both" base direction can only
+				// gate the base side's entries — it can never synthesize the opposite
+				// entry (the signal script already ran with the pre-override direction;
+				// see applyRegimeDivergenceOverride doc). Skip when a directional policy
+				// is configured, since that resolves direction per-regime (may be "both").
+				mode := sc.RegimeWindowDivergence.OnDivergence
+				if (mode == onDivergenceTrustShort || mode == onDivergenceTrustMedium) &&
+					EffectiveDirection(sc) != DirectionBoth &&
+					!sc.RegimeDirectionalPolicy.IsConfigured() {
+					fmt.Printf("[WARN] %s: regime_window_divergence on_divergence=%q with direction=%q acts as a stand-aside gate, not a flip — it can block %s entries but cannot open the opposite side. Use direction=\"both\" for full divergence-driven flipping.\n",
+						prefix, mode, EffectiveDirection(sc), EffectiveDirection(sc))
+				}
 			}
 		}
 		// stop_loss_atr_regime / trailing_stop_atr_regime vocabulary is resolved
