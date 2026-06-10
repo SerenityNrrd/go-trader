@@ -761,6 +761,16 @@ func main() {
 			// /api/regime must not keep serving the prior cycle's labels as
 			// fake-live while trading is suspended.
 			globalRegimeStore.resetForCycle(time.Now().UTC())
+			// #918: no balance fetch on this degenerate cycle, so clear any prior
+			// exchange-derived shared-wallet values to avoid serving stale equity
+			// from /status; display falls back to PortfolioValue.
+			mu.Lock()
+			for _, ss := range state.Strategies {
+				if ss != nil {
+					ss.SharedWalletValueSet = false
+				}
+			}
+			mu.Unlock()
 			mu.RLock()
 			totalPV, _ = computeTotalPortfolioValue(cfg.Strategies, state, prices, nil, sharedWallets)
 			mu.RUnlock()
@@ -998,7 +1008,17 @@ func main() {
 			if notionalBlocked {
 				fmt.Printf("[WARN] %s\n", portfolioReason)
 			}
+			// #918: exchange-authoritative shared-wallet reconciliation. Derive
+			// each member strategy's display value from the real account balance
+			// + on-chain positions just fetched (no extra I/O) so the per-strategy
+			// operator rows sum EXACTLY to the wallet balance, and capture
+			// per-wallet drift for the alarm below. Runs under the same write lock
+			// the risk check holds (mutates StrategyState.SharedWalletValue*).
+			driftResults := reconcileSharedWalletDisplayValues(cfg.Strategies, state, sharedWallets, walletBalances, hlPositions, okxPositions)
 			mu.Unlock()
+
+			// Fire throttled drift alarms outside the lock (notifier I/O).
+			reportSharedWalletDrift(notifier, driftResults)
 
 			// #341 / #345 / #346 / #347: Submit market closes to
 			// Hyperliquid, OKX, Robinhood, AND TopStep for every non-zero
@@ -2159,7 +2179,7 @@ func main() {
 
 					// Phase 6: RLock — status log
 					mu.RLock()
-					pv = PortfolioValue(stratState, prices)
+					pv = displayStrategyValue(stratState, prices)
 					posCount := len(stratState.Positions) + len(stratState.OptionPositions)
 					cash := stratState.Cash
 					regimeLabel := stratState.Regime

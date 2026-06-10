@@ -429,7 +429,7 @@ func (ss *StatusServer) uiStrategyOverview(id string) (UIStrategyOverview, Lifet
 	}
 
 	prices := ss.fetchLiveMarkPrices()
-	pv := PortfolioValue(&snapshot, prices)
+	pv := displayStrategyValue(&snapshot, prices)
 	initCap := EffectiveInitialCapital(sc, &snapshot)
 	pnl := pv - initCap
 	pnlPct := 0.0
