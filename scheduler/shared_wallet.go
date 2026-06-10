@@ -387,15 +387,24 @@ func computeInitialPortfolioPeak(strategies []StrategyConfig, fetcher WalletBala
 // rebaseline never drops below the sum-of-capitals baseline that a fresh
 // install would use — protects against under-baseline when most surviving
 // strategies are themselves cold-started.
-func rebaselinePortfolioPeakAfterPrune(state *AppState, cfg *Config) float64 {
+//
+// Same-account live HL manual strategies on a deduped shared wallet are
+// excluded from the per-strategy sum — CheckRisk never records their peak and
+// their collateral is inside the real balance (#921).
+func rebaselinePortfolioPeakAfterPrune(state *AppState, cfg *Config, fetcher WalletBalanceFetcher) float64 {
 	byID := make(map[string]StrategyConfig, len(cfg.Strategies))
 	for _, sc := range cfg.Strategies {
 		byID[sc.ID] = sc
 	}
 
+	dedupedManual := dedupedSameAccountLiveManualIDs(cfg.Strategies)
+
 	sum := 0.0
 	for id, ss := range state.Strategies {
 		if ss == nil {
+			continue
+		}
+		if dedupedManual[id] {
 			continue
 		}
 		if ss.RiskState.PeakValue > 0 {
@@ -407,7 +416,7 @@ func rebaselinePortfolioPeakAfterPrune(state *AppState, cfg *Config) float64 {
 		}
 	}
 
-	floor := computeInitialPortfolioPeak(cfg.Strategies, nil)
+	floor := computeInitialPortfolioPeak(cfg.Strategies, fetcher)
 	if sum < floor {
 		sum = floor
 	}

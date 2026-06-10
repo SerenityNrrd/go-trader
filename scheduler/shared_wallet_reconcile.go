@@ -459,6 +459,18 @@ func computeSubsetDisplayValue(
 	return gated + restVal, usedFallback
 }
 
+// dedupedSameAccountLiveManualIDs returns live HL manual strategy IDs whose
+// collateral is already inside a deduped shared-wallet balance (#921).
+func dedupedSameAccountLiveManualIDs(strategies []StrategyConfig) map[string]bool {
+	out := make(map[string]bool)
+	for key := range detectSharedWallets(strategies) {
+		for _, id := range sameAccountLiveManualMembers(key, strategies) {
+			out[id] = true
+		}
+	}
+	return out
+}
+
 // riskPathWalletMemberIDs returns perps shared-wallet members plus same-account
 // live HL manual strategies in subset. detectSharedWallets is perps-only, but
 // a live manual on the same HYPERLIQUID_ACCOUNT_ADDRESS is already inside the

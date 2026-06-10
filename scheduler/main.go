@@ -206,7 +206,7 @@ func main() {
 	// first risk-check cycle once current value drops to the surviving subset.
 	if pruned && state.PortfolioRisk.PeakValue > 0 {
 		oldPeak := state.PortfolioRisk.PeakValue
-		newPeak := rebaselinePortfolioPeakAfterPrune(state, cfg)
+		newPeak := rebaselinePortfolioPeakAfterPrune(state, cfg, nil)
 		if newPeak != oldPeak {
 			state.PortfolioRisk.PeakValue = newPeak
 			fmt.Printf("  Portfolio peak rebaselined after prune: $%.0f -> $%.0f\n", oldPeak, newPeak)
