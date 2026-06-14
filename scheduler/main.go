@@ -3106,13 +3106,7 @@ func runHyperliquidExecuteOrder(sc StrategyConfig, result *HyperliquidResult, pr
 	// only when there's nothing to flip into (never true here — flips always
 	// open a new side). Direction="short" + signal=-1 with orphan long is
 	// blocked by PerpsOrderSkipReason so it never reaches this code (#656).
-	pureClose := false
-	if result.Signal == -1 && posSide == "long" && !PerpsAllowsShort(sc) {
-		pureClose = true
-	}
-	if result.Signal == 1 && posSide == "short" && !PerpsAllowsLong(sc) {
-		pureClose = true
-	}
+	pureClose := perpsCloseActionSuppressesNewSL(result.Signal, posSide, PerpsAllowsLong(sc), PerpsAllowsShort(sc), result.CloseFraction)
 	// Partial close (#519): a fractional close from the open/close registry
 	// must NOT cancel the resting stop-loss — the SL is reduce-only and will
 	// continue to protect the residual position; cancelling without
@@ -3126,7 +3120,10 @@ func runHyperliquidExecuteOrder(sc StrategyConfig, result *HyperliquidResult, pr
 	// inherited a short position would otherwise see prevPosQty=posQty here
 	// while perpsLiveOrderSize sized it as a fresh open without that offset,
 	// leaving net_new_sz negative and the SL silently undersized (#421 review).
-	flipping := EffectiveDirection(sc) == DirectionBoth && posQty > 0 && ((result.Signal == 1 && posSide == "short") || (result.Signal == -1 && posSide == "long"))
+	// #1009: also require CloseFraction == 0 — a close action (any fraction > 0)
+	// is close-only, never a flip; the sizer's flip branch carries the same
+	// guard, so this mirror must too or prevPosQty diverges from the order size.
+	flipping := EffectiveDirection(sc) == DirectionBoth && posQty > 0 && result.CloseFraction == 0 && ((result.Signal == 1 && posSide == "short") || (result.Signal == -1 && posSide == "long"))
 	var cancelOID int64
 	if existingStopLossOID > 0 && posQty > 0 && !partialClose {
 		cancelOID = existingStopLossOID
