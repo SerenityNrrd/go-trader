@@ -105,6 +105,42 @@ def _load_regime():
     return _ensure_regime_fn
 
 
+def _regime_primary_labels(spec: Optional[dict]) -> Optional[tuple]:
+    """Valid regime labels for the PRIMARY (medium-first) window's classifier —
+    the vocabulary the backtester's single stamped regime label uses (#1058).
+
+    The regime-keyed exit consumers (``stop_loss_atr_regime`` /
+    ``trailing_stop_atr_regime`` / the ``sl_after`` regime block) validate and
+    resolve their per-label entries against this set, mirroring live's
+    ``regimeLabelsForStrategyWindow`` -> ``regimeLabelsForClassifier`` thread into
+    ``parseRegimeATRBlock`` / ``validatePostTPStopLossRulesWithLabels``. Without
+    it a composite-primary config would either be falsely rejected ("unknown
+    regime label 'ranging_quiet'") or, for an ADX-keyed block, silently resolve
+    to the default stop under a composite stamp.
+
+    Returns ``None`` for the legacy ADX path (no spec, or an ADX primary window)
+    so the parsers fall back to their canonical 3-label ADX default and the ADX
+    path stays byte-identical. Returns the sorted composite label tuple only when
+    the primary window is composite.
+    """
+    if not spec:
+        return None
+    from regime import (
+        valid_labels_for_classifier,
+        REGIME_PRIMARY_WINDOW_KEY,
+        CLASSIFIER_ADX,
+    )
+    primary_key = (
+        REGIME_PRIMARY_WINDOW_KEY
+        if REGIME_PRIMARY_WINDOW_KEY in spec
+        else sorted(spec.keys())[0]
+    )
+    classifier = str(spec[primary_key].get("classifier") or CLASSIFIER_ADX).strip().lower()
+    if classifier == CLASSIFIER_ADX:
+        return None
+    return tuple(sorted(valid_labels_for_classifier(classifier)))
+
+
 def _normalize_regime_directional_policy(policy: Optional[dict]) -> Optional[dict]:
     """Validate and compact ``regime_directional_policy`` for replay (#1025).
 
@@ -602,6 +638,7 @@ class Backtester:
                  regime_enabled: bool = False,
                  regime_period: int = 14,
                  regime_adx_threshold: float = 20.0,
+                 regime_windows_spec: Optional[dict] = None,
                  allowed_regimes: Optional[list[str]] = None,
                  stop_loss_atr_mult: Optional[float] = None,
                  stop_loss_pct: Optional[float] = None,
@@ -679,6 +716,20 @@ class Backtester:
         self.regime_enabled = regime_enabled
         self.regime_period = regime_period
         self.regime_adx_threshold = regime_adx_threshold
+        # #1058: optional composite (7-state) regime. When set, this is the live
+        # ``regime.windows`` spec map (already normalized: name -> {classifier,
+        # period, adx_threshold|thresholds}). The per-bar ``regime`` column and
+        # the close evaluator's ``_run_position_regime`` are then classified from
+        # the PRIMARY window — "medium" if present, else the first sorted key —
+        # mirroring live's REGIME_PRIMARY_WINDOW_KEY selection in
+        # regime_from_injected_payload. None keeps the legacy single-lookback ADX
+        # path (regime_period / regime_adx_threshold) byte-identical.
+        self.regime_windows_spec = dict(regime_windows_spec) if regime_windows_spec else None
+        # #1058: vocabulary the regime-keyed exit consumers (SL/trailing/sl_after)
+        # validate + resolve against — the primary window's classifier labels, so
+        # composite substates parse and resolve instead of being rejected or
+        # silently falling back to the default stop. None = legacy ADX (canonical).
+        self._regime_primary_labels = _regime_primary_labels(self.regime_windows_spec)
         self.allowed_regimes = list(allowed_regimes or [])
         self.stop_loss_atr_mult = stop_loss_atr_mult
         self.stop_loss_pct = stop_loss_pct
@@ -797,6 +848,7 @@ class Backtester:
                     self.stop_loss_atr_regime,
                     "stop_loss_atr_regime",
                     SURFACE_STOP_LOSS,
+                    labels=self._regime_primary_labels,
                 )
                 regime_errs.extend(errs)
                 self._stop_loss_regime_block = blk
@@ -805,6 +857,7 @@ class Backtester:
                     self.trailing_stop_atr_regime,
                     "trailing_stop_atr_regime",
                     SURFACE_TRAILING,
+                    labels=self._regime_primary_labels,
                 )
                 regime_errs.extend(errs)
                 self._trailing_stop_regime_block = blk
@@ -908,8 +961,23 @@ class Backtester:
         # thresholds once at init. When no sl_after is configured this is a
         # no-op and the per-bar SL machinery in run() short-circuits.
         self._sl_mod = _load_post_tp_sl()
+        # #1058: reject a tiered_tp_atr_regime / tiered_tp_atr_live_regime tier set
+        # keyed by labels the primary window's classifier can never emit (e.g. an
+        # ADX-keyed block under a composite primary, or the inverse) — live
+        # rejects it at config-load (regime_atr.go parseRegimeTPTiers with the
+        # ATR-window classifier labels). Without this the tier-fraction parser
+        # infers labels from the keys and resolve_regime_tier silently misses on
+        # every stamped label, disabling all take-profit tiers (a silent 0-TP run).
+        _tier_vocab_errs = self._sl_mod.validate_regime_tiered_tp_labels(
+            self._close_refs, labels=self._regime_primary_labels,
+        )
+        if _tier_vocab_errs:
+            raise ValueError(
+                "Invalid regime tiered-TP configuration: " + "; ".join(_tier_vocab_errs)
+            )
         self._sl_after_rules_static, _sl_parse_errs = (
-            self._sl_mod.parse_strategy_tp_sl_after_rules(self._close_refs)
+            self._sl_mod.parse_strategy_tp_sl_after_rules(
+                self._close_refs, labels=self._regime_primary_labels)
         )
         self._tp_tier_thresholds_static = self._sl_mod.parse_tp_tier_close_fractions(
             self._close_refs,
@@ -961,6 +1029,7 @@ class Backtester:
                 trailing_stop_pct=self.trailing_stop_pct,
                 stop_loss_atr_regime=self.stop_loss_atr_regime,
                 strategy_type=self.strategy_type,
+                labels=self._regime_primary_labels,
             )
             if errs:
                 raise ValueError(
@@ -1248,7 +1317,17 @@ class Backtester:
         # same OHLCV window → identical label by construction (same algorithm).
         if self.regime_enabled and "regime" not in df.columns:
             ensure_regime = _load_regime()
-            ensure_regime(df, period=self.regime_period, adx_threshold=self.regime_adx_threshold)
+            # #1058: when a composite windows spec is threaded, ensure_regime_columns
+            # classifies the PRIMARY window (medium-first) — composite (7-state) or
+            # ADX — exactly as live's regime store does for the strategy_regime that
+            # feeds close evaluators. Without it, the legacy single-lookback ADX
+            # (period / adx_threshold) path is unchanged.
+            ensure_regime(
+                df,
+                period=self.regime_period,
+                adx_threshold=self.regime_adx_threshold,
+                windows_spec=self.regime_windows_spec,
+            )
 
         # Snapshot the bar-close regime label before any shift so close
         # evaluators that re-resolve per bar (``tiered_tp_atr_live_regime``)
@@ -1368,6 +1447,7 @@ class Backtester:
             if self._uses_regime_tiered_close:
                 rules_rt, _ = self._sl_mod.parse_strategy_tp_sl_after_rules(
                     self._close_refs, regime=lab,
+                    labels=self._regime_primary_labels,
                 )
                 self._active_sl_after_rules = rules_rt
                 self._run_tp_tier_thresholds = self._sl_mod.parse_tp_tier_close_fractions(

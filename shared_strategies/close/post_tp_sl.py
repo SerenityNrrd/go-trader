@@ -720,8 +720,9 @@ def validate_post_tp_stop_loss_rules(
     trailing_stop_pct: Optional[float] = None,
     stop_loss_atr_regime: Optional[Any] = None,
     strategy_type: str = "perps",
+    labels: Optional[Iterable[str]] = None,
 ) -> List[str]:
-    """Mirror ``validatePostTPStopLossRules`` in scheduler/post_tp_sl.go.
+    """Mirror ``validatePostTPStopLossRulesWithLabels`` in scheduler/post_tp_sl.go.
 
     Conditions enforced:
       - shape/field-level errors from parsing
@@ -730,9 +731,16 @@ def validate_post_tp_stop_loss_rules(
       - reject combination with a strategy-level trailing stop
       - require a fixed stop-loss to adjust
       - reject trail_from_here on manual strategies (perps-only in v1)
+
+    ``labels`` is the regime vocabulary the strategy's primary/ATR window
+    classifier emits (#1058): live threads ``regimeLabelsForStrategyWindow`` here
+    so a composite-keyed ``stop_loss_atr_regime`` / ``sl_after`` block validates
+    against the 7-state substates instead of the 3 ADX labels. ``None`` keeps the
+    legacy ADX behavior byte-identical (``parse_regime_atr_block`` defaults to the
+    canonical ADX labels; ``parse_strategy_tp_sl_after_rules`` infers from keys).
     """
     close_refs = list(close_refs)
-    rules, parse_errs = parse_strategy_tp_sl_after_rules(close_refs)
+    rules, parse_errs = parse_strategy_tp_sl_after_rules(close_refs, labels=labels)
     out: List[str] = list(parse_errs)
     for ref in close_refs:
         name = (ref.get("name") or "").strip().lower()
@@ -763,6 +771,7 @@ def validate_post_tp_stop_loss_rules(
         )
     blk_sl_regime, sl_regime_errs = parse_regime_atr_block(
         stop_loss_atr_regime, "stop_loss_atr_regime", SURFACE_STOP_LOSS,
+        labels=tuple(labels) if labels is not None else None,
     )
     if stop_loss_atr_regime is not None and sl_regime_errs:
         out.extend(sl_regime_errs)
@@ -798,6 +807,79 @@ def validate_post_tp_stop_loss_rules(
                     "breakeven or atr_mult instead"
                 )
     return out
+
+
+def validate_regime_tiered_tp_labels(
+    close_refs: Iterable[dict],
+    labels: Optional[Iterable[str]] = None,
+) -> List[str]:
+    """Validate ``tiered_tp_atr_regime`` / ``tiered_tp_atr_live_regime`` tier-key
+    vocabularies against the strategy's primary-window classifier ``labels`` (#1058).
+
+    Mirrors the intent of the live config-load check in scheduler/regime_atr.go
+    (``parseRegimeTPTiers`` keyed by ``regimeLabelsForStrategyWindow``): a tier's
+    ``trend_regime`` block keyed by labels the primary window's classifier can
+    never emit — an ADX-keyed tier under a composite primary window, or the
+    inverse — is rejected loudly at load. Without it the backtester's
+    ``parse_tp_tier_close_fractions`` infers labels from the tier keys and then
+    ``resolve_regime_tier`` silently misses on every stamped label, disabling all
+    take-profit tiers (a 0-TP run that reads as "never hit TP", not "bad config").
+
+    Guards the tier-key VOCABULARY only — by inspecting each tier's
+    ``trend_regime`` keys, never re-parsing tier shape/count/sibling keys
+    (``sl_after``, ``tp_atr_fraction``, scalar ``close_fraction``), which the
+    backtester's existing machinery and the HL-live-only guards already handle.
+    Each per-regime tier must be EXHAUSTIVE over the expected vocabulary: a key
+    the classifier can never emit is flagged as unknown, and an omitted label is
+    flagged as missing — mirroring live ``parseRegimeATRBlock`` (regime_atr.go),
+    which rejects a non-exhaustive ``trend_regime`` block per tier ("must be
+    exhaustive — no silent fallback"). Without the missing-label arm a
+    composite-primary config with a partially-keyed tier passes the backtester
+    but is rejected live, and ``resolve_regime_tier`` silently no-ops TP on every
+    un-keyed substate. A tier-level ``use_defaults`` expands to the full
+    vocabulary at the resolver, so it is exempt (like live's early-return).
+    ``labels=None`` resolves to the canonical 3 ADX labels, so the ADX/legacy
+    path is byte-identical AND an ADX-primary strategy still rejects
+    composite-keyed tiers (must-survive (b)). Returns error strings (empty=valid).
+    """
+    expected = set(labels) if labels is not None else set(CANONICAL_TREND_REGIME_LABELS)
+    errs: List[str] = []
+    for ref in close_refs:
+        name = (ref.get("name") or "").strip().lower()
+        if name not in ("tiered_tp_atr_regime", "tiered_tp_atr_live_regime"):
+            continue
+        params = ref.get("params") or {}
+        if bool(params.get("use_defaults")):
+            # Baseline ladder carries no operator-supplied keys to mis-vocabulary;
+            # validated at the default-tier resolver, like live.
+            continue
+        tiers_raw = tier_list_from_params(params)
+        if not isinstance(tiers_raw, list):
+            continue
+        for i, tier in enumerate(tiers_raw):
+            if not isinstance(tier, dict):
+                continue
+            if bool(tier.get("use_defaults")):
+                # Tier-level use_defaults expands to the full vocabulary at the
+                # resolver (mirrors live parseRegimeATRBlock early-return) — no
+                # operator-supplied keys to mis-vocabulary or omit.
+                continue
+            block = tier.get(REGIME_CLASSIFIER_KEY)
+            if not isinstance(block, dict):
+                continue
+            for key in sorted(k for k in block.keys() if k not in expected):
+                errs.append(
+                    f"{name}.tiers[{i}].{REGIME_CLASSIFIER_KEY}: unknown regime "
+                    f"label {key!r} (expected one of: {', '.join(sorted(expected))})"
+                )
+            missing = [label for label in sorted(expected) if label not in block]
+            if missing:
+                errs.append(
+                    f"{name}.tiers[{i}].{REGIME_CLASSIFIER_KEY}: missing required "
+                    f"regime labels: {', '.join(missing)} "
+                    f"(must be exhaustive — no silent fallback)"
+                )
+    return errs
 
 
 def parse_tp_tier_close_fractions(
