@@ -7,6 +7,11 @@
 # #790: --rsync-from safe tree sync; warn on missing systemd EnvironmentFile.
 #   --rsync-from preserves deployment .git/ (not copied from source) so rollback
 #   git reset --hard still targets the deployment repo's pre-sync SHA.
+# #1055: --all batch = UNION of ACTIVE go-trader systemd units' WorkingDirectory
+#   (layout-independent) and the <root>/go-trader-*/ glob, so neither a scattered
+#   systemd deployment nor a signal-mode/unloaded one under the glob root silently
+#   leaves the batch. Auto-discovery is active-only (never starts a stopped unit).
+#   An explicit --update-all-root / GO_TRADER_UPDATE_ALL_ROOT pins the glob root.
 #
 # Phases:
 #   preflight  — git/uv/go sanity checks
@@ -128,6 +133,11 @@ while [[ $# -gt 0 ]]; do
             echo "       $0 --all [--restart] [--restart-mode systemd|signal] [--update-all-root <dir>] [...]"
             echo "  --rsync-from <dir>  rsync code from a source clone into this deployment (skips git pull;"
             echo "                      hardcoded exclusions protect .env, config, state DB, venv, binaries)."
+            echo "  --all               update+restart every deployment. Batch = union of ACTIVE go-trader"
+            echo "                      systemd units' WorkingDirectory (layout-independent) and the"
+            echo "                      <root>/go-trader-*/ glob. Auto-discovery is active-only, so it never"
+            echo "                      starts a stopped/failed deployment; the glob still restarts anything"
+            echo "                      under <root>. --update-all-root pins the glob root (skips systemd)."
             echo "  With --all + systemd: each child inherits GO_TRADER_SERVICE — set per-worktree env if units differ."
             echo "  RESTART=1 env var also enables restart."
             echo "  RESTART_MODE=signal requires Linux, GO_TRADER_RUN_SH, GO_TRADER_PIDFILE (see #766)."
@@ -138,7 +148,7 @@ while [[ $# -gt 0 ]]; do
             echo "  GO_TRADER_RUN_SH=<path>    wrapper to respawn (default: ./run.sh; signal mode)"
             echo "  GO_TRADER_PIDFILE=<path>   pidfile written by wrapper (default: ./go-trader.pid)"
             echo "  GO_TRADER_SIGNAL_LOG=<path> append stdout/stderr from wrapper (default: ./go-trader-signal.log)"
-            echo "  GO_TRADER_UPDATE_ALL_ROOT=<dir>  parent scanned by --all for go-trader-*/ (default: parent of this repo)"
+            echo "  GO_TRADER_UPDATE_ALL_ROOT=<dir>  pin --all to the <dir>/go-trader-*/ glob (skips systemd auto-discovery; default: parent of this repo)"
             echo "  STATUS_PORT=<n>            override /health port (default: read from config, else 8099)"
             echo "  ACTIVE_TIMEOUT=<sec>       systemd is-active or signal SIGTERM wait (default: 30)"
             echo "  HEALTH_TIMEOUT=<sec>       /health version-match poll timeout (default: 60)"
@@ -569,27 +579,23 @@ verify_cur_restart_pid() {
 
 begin_phase preflight
 
-if ! command -v uv >/dev/null 2>&1; then
-    fail "uv not on PATH — install uv first (see CLAUDE.md → Setup)"
-fi
-
-go_bin=""
-if command -v go >/dev/null 2>&1; then
-    go_bin=$(command -v go)
-elif [[ -x /opt/homebrew/bin/go ]]; then
-    go_bin=/opt/homebrew/bin/go
-elif [[ -x /usr/local/go/bin/go ]]; then
-    go_bin=/usr/local/go/bin/go
-else
-    fail "go not on PATH and not found at /opt/homebrew/bin/go or /usr/local/go/bin/go"
-fi
-
 repo_root=$(git rev-parse --show-toplevel)
 cd "$repo_root"
 
+# The --all coordinator only fans out to per-deployment child update.sh runs (each
+# does its own uv/go preflight + build), so it must reach discovery/dispatch WITHOUT
+# the build toolchain on the coordinator host (#1055 review): the CI go-job has no
+# uv, and a thin coordinator may carry only git + systemd. Dispatch BEFORE the uv/go
+# checks below, which gate the single-repo build path only.
 if [[ "$update_all" == "1" ]]; then
+    # scan_root drives the legacy go-trader-*/ glob fallback. An explicit override
+    # (env or --update-all-root) means the operator is pinning the batch root, so we
+    # honor the glob and skip systemd auto-discovery (keeps that flow unchanged, #1055).
     scan_root="$(trim_space "${GO_TRADER_UPDATE_ALL_ROOT:-}")"
-    if [[ -z "$scan_root" ]]; then
+    scan_root_explicit=0
+    if [[ -n "$scan_root" ]]; then
+        scan_root_explicit=1
+    else
         scan_root=$(dirname "$repo_root")
     fi
     declare -a child_args=()
@@ -605,36 +611,84 @@ if [[ "$update_all" == "1" ]]; then
         fi
         if [[ "$a" == --update-all-root=* ]]; then
             scan_root="$(trim_space "${a#*=}")"
+            scan_root_explicit=1
             continue
         fi
         if [[ "$a" == "--update-all-root" ]]; then
             scan_root="$(trim_space "${orig_argv[$((i + 1))]}")"
+            scan_root_explicit=1
             skip_next=1
             continue
         fi
         child_args+=("$a")
     done
-    if [[ ! -d "$scan_root" ]]; then
+    # Build the deployment batch by UNIONing two sources, so no deployment the
+    # operator expects --all to cover silently leaves the batch (#1055 review):
+    #   - systemd: ACTIVE go-trader units' WorkingDirectory (canonical, layout-
+    #     independent, even across different parent dirs).
+    #   - glob: $scan_root/go-trader-*/ (the pre-#1055 behavior), which still catches
+    #     a signal-mode or not-currently-loaded deployment living under the glob root
+    #     that active-unit discovery alone would miss.
+    # An explicit --update-all-root / GO_TRADER_UPDATE_ALL_ROOT pins the glob root and
+    # SUPPRESSES systemd discovery, keeping that documented flow unchanged.
+    declare -a discovered=()
+    declare -a discovery_sources=()
+    if [[ "$scan_root_explicit" != "1" ]]; then
+        before_count=${#discovered[@]}
+        while IFS= read -r line; do
+            [[ -n "$line" ]] && discovered+=("$line")
+        done < <(discover_deployment_dirs_from_systemd)
+        [[ ${#discovered[@]} -gt $before_count ]] && discovery_sources+=("systemd")
+    fi
+    if [[ -d "$scan_root" ]]; then
+        shopt -s nullglob
+        glob_dirs=( "$scan_root"/go-trader-*/ )
+        shopt -u nullglob
+        if [[ ${#glob_dirs[@]} -gt 0 ]]; then
+            discovered+=( "${glob_dirs[@]}" )
+            discovery_sources+=("glob")
+        fi
+    elif [[ "$scan_root_explicit" == "1" ]]; then
         fail "GO_TRADER_UPDATE_ALL_ROOT / --update-all-root is not a directory: $scan_root"
     fi
-    shopt -s nullglob
-    all_dirs=( "$scan_root"/go-trader-*/ )
-    shopt -u nullglob
-    if [[ ${#all_dirs[@]} -eq 0 ]]; then
-        fail "no directories matching $scan_root/go-trader-*/ (batch root: $scan_root)"
+    if [[ ${#discovered[@]} -eq 0 ]]; then
+        fail "no deployments found: no ACTIVE go-trader systemd units (systemctl absent or none active) and no directories match $scan_root/go-trader-*/ (batch root: $scan_root). Set --update-all-root <dir> / GO_TRADER_UPDATE_ALL_ROOT, or start the deployments' systemd units."
     fi
-    declare -a sorted_dirs=()
+    # Canonicalize each dir to its physical path BEFORE de-duping, so a systemd
+    # WorkingDirectory and a glob hit that resolve to the same directory (via a
+    # symlink, /./ or //) collapse to one entry — otherwise that one live deployment
+    # would be updated and restarted twice (#1055 review). De-dupe + sort for stable
+    # operator output; genuinely distinct physical dirs are preserved.
+    declare -a canon=()
+    for d in "${discovered[@]}"; do
+        canon+=("$(canonicalize_deployment_dir "$d")")
+    done
+    declare -a all_dirs=()
     while IFS= read -r line; do
-        [[ -n "$line" ]] && sorted_dirs+=("$line")
-    done < <(printf '%s\n' "${all_dirs[@]}" | sort -u)
-    all_dirs=( "${sorted_dirs[@]}" )
+        [[ -n "$line" ]] && all_dirs+=("$line")
+    done < <(printf '%s\n' "${canon[@]}" | sort -u)
+    discovery_source=$(IFS='+'; printf '%s' "${discovery_sources[*]}")
+    echo "[update] --all: ${#all_dirs[@]} deployment dir(s) via ${discovery_source} discovery"
     fail_count=0
+    skip_count=0
+    update_count=0
+    # Every counted dir that is skipped is reported with a reason, so the announced
+    # count above reconciles with what actually updates (#1055 review). Systemd
+    # discovery can surface dirs with no deployment (e.g. the primary unit's source
+    # repo, which has no scheduler/config.json); they must not vanish silently.
     for d in "${all_dirs[@]}"; do
-        [[ -d "$d" ]] || continue
+        if [[ ! -d "$d" ]]; then
+            echo "[update] --all: skipping $d (no longer a directory)" >&2
+            skip_count=$((skip_count + 1))
+            continue
+        fi
         if [[ ! -f "${d}scheduler/config.json" ]]; then
+            echo "[update] --all: skipping $(cd "$d" && pwd) (no scheduler/config.json — not a deployment)" >&2
+            skip_count=$((skip_count + 1))
             continue
         fi
         echo "[update] --all: $(cd "$d" && pwd)"
+        update_count=$((update_count + 1))
         if (cd "$d" && bash "$THIS_SCRIPT" "${child_args[@]}"); then
             :
         else
@@ -643,10 +697,30 @@ if [[ "$update_all" == "1" ]]; then
         fi
     done
     if [[ $fail_count -ne 0 ]]; then
-        fail "--all completed with $fail_count failing instance(s)"
+        fail "--all completed with $fail_count failing instance(s) ($update_count updated, $skip_count skipped)"
     fi
-    echo "[update] --all: all instances OK"
+    if [[ $update_count -eq 0 ]]; then
+        fail "--all updated 0 deployments ($skip_count of ${#all_dirs[@]} discovered dir(s) skipped — none had scheduler/config.json). Check discovery: --update-all-root <dir> / GO_TRADER_UPDATE_ALL_ROOT, or systemd unit WorkingDirectory."
+    fi
+    echo "[update] --all: all instances OK ($update_count updated, $skip_count skipped of ${#all_dirs[@]} discovered)"
     exit 0
+fi
+
+# Build-toolchain preflight: gates the single-repo update path only (the --all
+# coordinator dispatched above without it; each child re-runs this in its own dir).
+if ! command -v uv >/dev/null 2>&1; then
+    fail "uv not on PATH — install uv first (see CLAUDE.md → Setup)"
+fi
+
+go_bin=""
+if command -v go >/dev/null 2>&1; then
+    go_bin=$(command -v go)
+elif [[ -x /opt/homebrew/bin/go ]]; then
+    go_bin=/opt/homebrew/bin/go
+elif [[ -x /usr/local/go/bin/go ]]; then
+    go_bin=/usr/local/go/bin/go
+else
+    fail "go not on PATH and not found at /opt/homebrew/bin/go or /usr/local/go/bin/go"
 fi
 
 if [[ ! -f scheduler/config.json ]]; then
@@ -662,7 +736,7 @@ scheduler/config.json and fill in API keys (see CLAUDE.md → Setup).
 
 If you moved config out of the tree (#1056), scheduler/config.json should be a
 symlink to e.g. /var/lib/go-trader/<instance>/config.json — recreate it with
-scripts/migrate-config-out-of-tree.sh or `ln -s <target> scheduler/config.json`.
+scripts/migrate-config-out-of-tree.sh or \`ln -s <target> scheduler/config.json\`.
 
 If you are syncing source to multiple deployment instances, build in the
 source repo and run scripts/update.sh from each deployment instance.

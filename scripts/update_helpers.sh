@@ -73,6 +73,89 @@ update_should_sweep_proc() {
     printf 'sweep'
 }
 
+# Unit name-patterns --all matches when auto-discovering deployments from systemd
+# (#1055). Covers the primary unit (go-trader.service), plain per-deployment units
+# (go-trader-live.service), and template instances (go-trader@live.service). The
+# bare template file go-trader@.service is never listed by `systemctl list-units`
+# (only loaded instances are), so it cannot leak an empty WorkingDirectory here.
+update_systemd_unit_globs() {
+    printf '%s\n' 'go-trader.service' 'go-trader-*.service' 'go-trader@*.service'
+}
+
+# Normalize systemd WorkingDirectory values (one per line on stdin) into the
+# deployment-dir list update.sh --all iterates (#1055). Drops empty/unset and
+# relative values, collapses to exactly one trailing slash (the --all loop reads
+# "${d}scheduler/config.json"), and de-duplicates preserving first-seen order.
+# Pure: no systemctl, no filesystem access — unit-testable.
+normalize_systemd_deployment_dirs() {
+    # Newline-delimited "seen" accumulator instead of an associative array, so the
+    # helper runs under bash 3.2 (macOS dev/CI) as well as Linux deployments.
+    local line seen=$'\n'
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        # trim surrounding whitespace (helper is sourced standalone in tests, so
+        # it cannot rely on update.sh's trim_space).
+        line="${line#"${line%%[![:space:]]*}"}"
+        line="${line%"${line##*[![:space:]]}"}"
+        [[ -n "$line" ]] || continue
+        # WorkingDirectory must be absolute; systemctl prints empty for unset.
+        [[ "$line" == /* ]] || continue
+        line="${line%/}/"
+        case "$seen" in
+            *$'\n'"$line"$'\n'*) continue ;;
+        esac
+        seen="${seen}${line}"$'\n'
+        printf '%s\n' "$line"
+    done
+}
+
+# Auto-discover deployment dirs for --all from systemd unit WorkingDirectory
+# (#1055) — canonical and layout-independent (works regardless of where each
+# deployment lives, even across different parent dirs). Emits normalized dirs on
+# stdout, one per line; emits nothing when systemctl is absent or no matching
+# ACTIVE units exist, so the caller can union with / fall back to the glob.
+#
+# --state=active (NOT --all): only currently-running units are surfaced. --all is
+# a fan-out of `--restart`, so discovering a loaded-but-inactive unit would let the
+# child `systemctl restart` START a deliberately stopped/failed trading bot (#1055
+# review). Restricting to active units means auto-discovery never changes a
+# deployment's run/stop state; stopped deployments must be named via the glob root
+# (--update-all-root) if the operator really intends to (re)start them.
+discover_deployment_dirs_from_systemd() {
+    command -v systemctl >/dev/null 2>&1 || return 0
+    local -a globs=()
+    local g
+    while IFS= read -r g; do
+        [[ -n "$g" ]] && globs+=("$g")
+    done < <(update_systemd_unit_globs)
+    local -a units=()
+    local unit
+    while IFS= read -r unit; do
+        [[ -n "$unit" ]] && units+=("$unit")
+    done < <(systemctl list-units --type=service --state=active --no-legend --plain "${globs[@]}" 2>/dev/null | awk '{print $1}')
+    [[ ${#units[@]} -gt 0 ]] || return 0
+    for unit in "${units[@]}"; do
+        systemctl show "$unit" -p WorkingDirectory --value 2>/dev/null
+    done | normalize_systemd_deployment_dirs
+}
+
+# Canonicalize a discovered deployment dir to its PHYSICAL path (resolving symlinks,
+# /./ and // segments) with a single trailing slash, so two different spellings of
+# the same directory — a systemd WorkingDirectory taken verbatim from the unit file
+# vs. a glob hit under $scan_root — collapse under the --all `sort -u` dedup. Without
+# this the same live trading process would be updated AND restarted twice (#1055
+# review). `cd … && pwd -P` is the portable resolver (bash 3.2, no realpath needed).
+# A path that is not an existing directory cannot be resolved — it is returned
+# trailing-slash-normalized only (the --all loop then reports/skips it); two genuinely
+# distinct dirs never collapse because their physical paths differ.
+canonicalize_deployment_dir() {
+    local d="$1" phys
+    if [[ -d "$d" ]] && phys=$(cd "$d" 2>/dev/null && pwd -P); then
+        printf '%s/\n' "$phys"
+    else
+        printf '%s\n' "${d%/}/"
+    fi
+}
+
 # Classify a config path for the out-of-tree migration (#1056). Echoes:
 #   symlink  — already a symlink (migration done; idempotent no-op). Checked
 #              FIRST so a DANGLING symlink (target moved/removed) still reports
