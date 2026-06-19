@@ -9,7 +9,7 @@
 - `uv sync`; copy `scheduler/config.example.json` → `scheduler/config.json`, fill API keys. **#1056 (deployments):** keep runtime config OUT of the deploy tree (`/var/lib/go-trader[/<instance>]/config.json`) with `scheduler/config.json` as a symlink — stop the service, run `scripts/migrate-config-out-of-tree.sh` once (it refuses while the daemon is live, else a config write in the migrate→restart window clobbers the symlink into an in-tree file), then point the unit's `ExecStart --config` + `StateDirectory` at it. Stops any rsync/`git clean`/`rm` from reaching the live config.
 
 ## Decision Priorities
-- **Pick the best technical solution.** Tests, code volume, time-to-implement are NOT design constraints — update/rewrite tests after the feature is done. These govern *quality*, not *scope*; don't override the branch+PR workflow, "verify issue claims against code", or destructive-action safety rules.
+- **Always pursue the absolute best technical solution — full stop.** Cost, compute, resources, time-to-implement, effort, manpower, tests, and code volume are NOT design constraints and must never narrow the option space: choose the best solution as if these were unlimited, then update/rewrite tests after the feature is done. These govern *quality*, not *scope*; don't override the branch+PR workflow, "verify issue claims against code", or destructive-action safety rules.
 
 ## Repo Structure
 `scheduler/` is one Go `package main`. **Guardrails only below — full file-ownership map, symbol/config inventories, and per-feature mechanics live in `docs/ARCHITECTURE.md` (not auto-loaded; read the relevant section there before editing a subsystem).**
