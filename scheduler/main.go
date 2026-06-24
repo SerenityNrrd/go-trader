@@ -961,6 +961,12 @@ func main() {
 			_, okxShared := sharedWallets[okxKey]
 			var okxPositions []OKXPosition
 			var okxStateFetched bool
+			// okxBalanceFetched / okxSnapshotAt mirror hlStateFetched / hlSnapshotAt:
+			// the #1105 OKX cash-flow journal bounds its bill ingestion to the eq
+			// snapshot instant so an in-flight bill cannot read as drift.
+			var okxBalanceFetched bool
+			var okxSnapshotUPnL float64
+			var okxSnapshotAt time.Time
 			if okxHasCreds && len(okxLivePerps) > 0 {
 				pos, err := defaultOKXPositionsFetcher()
 				if err != nil {
@@ -975,10 +981,18 @@ func main() {
 			// an API key. Independent subprocess so a fetch_positions outage
 			// doesn't starve the balance read.
 			if okxHasCreds && okxShared {
-				if bal, err := defaultSharedWalletBalance("okx"); err != nil {
+				// #1105: one fetch_balance read yields a COHERENT (eq, uPnL) pair —
+				// eq feeds the #918 split (walletBalances) unchanged, and the same
+				// snapshot's uPnL (eq − cashBal) feeds the cash-flow journal, so its
+				// expected-equity and reconciled eq cancel the uPnL term exactly
+				// (no jitter from a separately-timed fetch_positions read).
+				if eq, upnl, err := defaultOKXEquitySnapshot(); err != nil {
 					fmt.Printf("[WARN] okx balance fetch failed: %v — falling back to per-wallet max this cycle\n", err)
 				} else {
-					walletBalances[okxKey] = bal
+					walletBalances[okxKey] = eq
+					okxBalanceFetched = true
+					okxSnapshotUPnL = upnl
+					okxSnapshotAt = time.Now().UTC()
 				}
 			}
 			// #362: Fetch TopStep positions once per cycle when any live TS
@@ -1085,6 +1099,23 @@ func main() {
 			if hlShared && hlStateFetched {
 				rec := reconcileCashflowJournal(stateDB, hlKey, walletBalances[hlKey], sumHLAccountUPnL(hlPositions), hlSnapshotAt)
 				applyCashflowJournalDriftBasis(driftResults, hlKey, rec, cashflowJournalAlarmEnabled())
+			}
+
+			// #1105: OKX cash-flow journal — SHADOW phase (Phase 3a of #1100). The
+			// wallet TOTAL is reconstructed from OKX's account-bills feed (every
+			// settled-cash movement is a bill carrying balChg) and reconciled
+			// against eq, exactly as the HL journal does, but it ONLY logs the
+			// journal-vs-capital-weight comparison each cycle — it never drives the
+			// OKX drift alarm, which stays on the #918 capital-weight split.
+			// Flipping the OKX alarm onto the journal is Phase 3b, gated on this
+			// shadow log proving the OKX bills feed / eq field in production. Runs
+			// outside the lock (subprocess fetch + DB-only writes) and is bounded to
+			// the COHERENT eq/uPnL snapshot from the single balance read above
+			// (walletBalances[okxKey] + okxSnapshotUPnL @ okxSnapshotAt) — no
+			// positions dependency, so eq and uPnL share one instant.
+			if okxShared && okxBalanceFetched {
+				okxRec := reconcileOKXCashflowJournal(stateDB, okxKey, walletBalances[okxKey], okxSnapshotUPnL, okxSnapshotAt)
+				logOKXCashflowJournalShadow(driftResults, okxKey, okxRec)
 			}
 
 			// Fire throttled drift alarms outside the lock (notifier I/O). For HL

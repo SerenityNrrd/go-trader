@@ -23,6 +23,57 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'
 import ccxt
 
 
+def _bill_float(value) -> float:
+    """Parse an OKX bill numeric field; missing/blank/garbage → 0.0."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _okx_usdt_cash_balance(info):
+    """Pull the USDT ``cashBal`` from a raw OKX fetch_balance ``info`` payload
+    (``data[0].details[]``). Returns a float, or None when the field is absent
+    or unparseable. Pure — unit-tested without a live exchange."""
+    try:
+        details = ((info or {}).get("data") or [{}])[0].get("details") or []
+    except (AttributeError, IndexError, TypeError):
+        return None
+    for d in details:
+        try:
+            if str(d.get("ccy") or "").upper() == "USDT":
+                return float(d.get("cashBal"))
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def _normalize_okx_bill(entry: dict) -> dict:
+    """Normalize one ccxt fetch_ledger entry into the #1105 journal bill shape.
+
+    Pulls the raw OKX bill from ``entry["info"]`` (authoritative field names —
+    billId/balChg/etc.) and falls back to the ccxt-unified ``timestamp`` for the
+    millisecond time when the raw ``ts`` is absent. Pure — unit-tested without a
+    live exchange.
+    """
+    info = entry.get("info") or {}
+    ts = info.get("ts")
+    if ts in (None, ""):
+        ts = entry.get("timestamp")
+    return {
+        "bill_id": str(info.get("billId") or entry.get("id") or ""),
+        "ts_ms": int(_bill_float(ts)),
+        "ccy": str(info.get("ccy") or ""),
+        "type": str(info.get("type") or ""),
+        "sub_type": str(info.get("subType") or ""),
+        "bal_chg": _bill_float(info.get("balChg")),
+        "pnl": _bill_float(info.get("pnl")),
+        "fee": _bill_float(info.get("fee")),
+        "inst_id": str(info.get("instId") or ""),
+        "trade_id": str(info.get("tradeId") or ""),
+    }
+
+
 class OKXExchangeAdapter:
     """
     Exchange adapter for OKX — spot, perpetual swaps, and options.
@@ -261,6 +312,134 @@ class OKXExchangeAdapter:
             return float(total.get("USDT") or 0.0)
         except (TypeError, ValueError):
             return 0.0
+
+    def get_account_equity_and_upnl(self) -> Tuple[float, float]:
+        """Return a COHERENT ``(equity, unrealized_pnl)`` snapshot from ONE
+        ``fetch_balance`` call, for the #1105 cash-flow journal.
+
+        ``equity`` is the USDT account value (ccxt ``total["USDT"]`` == OKX
+        ``eq`` — the same field ``get_account_balance`` returns and the #918
+        capital-weight split reconciles). ``unrealized_pnl`` is derived as
+        ``eq - cashBal`` for USDT from the SAME response, so eq and uPnL are one
+        atomic snapshot: in the journal's equity equation the uPnL term then
+        cancels exactly against ``eq``, leaving residual drift = settled-cash
+        reconstruction error only. Pairing eq with a uPnL sampled from a SEPARATE
+        ``fetch_positions`` call (a different instant) would inject intra-cycle
+        uPnL jitter — dollars on a leveraged position — into the shadow drift,
+        the very signal Phase 3b must evaluate.
+
+        Falls back to uPnL ``0.0`` when the USDT ``cashBal`` is absent/unparseable
+        (the shadow drift then conservatively carries uPnL — visible, never a
+        false "clean"). Only available in live mode; raises in paper mode.
+        """
+        if not self._is_live:
+            raise RuntimeError(
+                "get_account_equity_and_upnl requires live mode (set OKX_API_KEY, OKX_API_SECRET, OKX_PASSPHRASE)"
+            )
+        bal = self._exchange.fetch_balance()
+        total = bal.get("total") or {}
+        try:
+            eq = float(total.get("USDT") or 0.0)
+        except (TypeError, ValueError):
+            eq = 0.0
+        cash_bal = _okx_usdt_cash_balance(bal.get("info"))
+        upnl = (eq - cash_bal) if cash_bal is not None else 0.0
+        return eq, upnl
+
+    def get_account_bills(self, since_ms: int = 0, page_limit: int = 100,
+                          max_bills: int = 10000) -> Tuple[list, bool]:
+        """Fetch OKX account bills (settled cash-flow events) since ``since_ms``
+        for the #1105 exchange-sourced cash-flow journal (shadow phase).
+
+        Every OKX balance change is an account bill carrying ``balChg`` (the
+        signed change to the settled cash balance), so this single feed is the
+        COMPLETE settled-cash-flow source — trade PnL, fees, funding, transfers,
+        deposits and withdrawals are all bills. ``balChg`` already nets every
+        component, so the consumer needs no per-fill fee arithmetic; ``pnl`` /
+        ``fee`` are returned as attribution metadata only.
+
+        Returns ``(bills, capped)`` where ``bills`` is oldest-first, each a dict:
+        ``{"bill_id","ts_ms","ccy","type","sub_type","bal_chg","pnl","fee",
+        "inst_id","trade_id"}`` sourced from the raw OKX bill
+        (ccxt ``fetch_ledger`` entry ``info``). ``capped`` is True when the
+        ``max_bills`` safety cap was hit before the feed was exhausted — the Go
+        journal then treats that cycle as not-usable but still advances its
+        cursor past the contiguous oldest prefix.
+
+        Horizon: ccxt ``fetch_ledger`` reads OKX ``/account/bills`` (~7 days). In
+        steady per-cycle operation the window is ample; after a multi-day outage
+        older bills fall outside it and surface as journal drift in the shadow
+        log (visible to the operator before any Phase-3b alarm flip).
+
+        Ordering assumption: this pages FORWARD by timestamp and relies on ccxt's
+        unified ``fetch_ledger`` returning entries ascending-from-``since`` (ccxt
+        ``parse_ledger`` sorts by timestamp). That contract — and that the
+        millisecond ``ts`` matches the live feed — is offline-unverifiable; confirm
+        the settled-Σ tracks eq to ~0 over a multi-cycle live window before any
+        Phase-3b alarm flip.
+
+        Only available in live mode; raises RuntimeError in paper mode.
+        """
+        if not self._is_live:
+            raise RuntimeError(
+                "get_account_bills requires live mode (set OKX_API_KEY, OKX_API_SECRET, OKX_PASSPHRASE)"
+            )
+        collected = {}
+        cursor = int(since_ms or 0)
+        capped = False
+        # Page FORWARD from the cursor, advancing the `since` watermark with a
+        # one-millisecond OVERLAP (cursor = page's last ts, NOT last_ts + 1) so a
+        # bill that shares the boundary millisecond but fell beyond the page cut
+        # is re-fetched on the next page — the `collected` dedup absorbs the
+        # re-read. Advancing past last_ts would permanently skip such a same-ms
+        # bill (a standing offset in the settled sum, not a transient miss).
+        #
+        # INVARIANT: capped=False must mean the feed was DRAINED (a short/empty
+        # page), never that the per-cycle iteration budget ran out. The overlap
+        # re-read makes net-new-per-page < page_limit when bills cluster on the
+        # boundary millisecond (a fill emits a trade + a fee bill at the same ms;
+        # settlements batch), so a dense backlog can exhaust the budget before the
+        # feed drains AND before the max_bills cap trips. The `for…else` makes that
+        # budget-exhaustion fall-through report capped=True: every feed-drained or
+        # cap exit above uses `break` (so `else` does NOT run), and only a loop that
+        # runs out of iterations reaches `else`. The Go journal then treats the
+        # cycle as not-usable and re-reads forward from maxTime next cycle
+        # (okxBillDedupID / INSERT OR IGNORE absorbs the re-reads) instead of
+        # advancing the cursor past the unfetched tail.
+        for _ in range(max(1, max_bills // max(1, page_limit)) + 2):
+            page = self._exchange.fetch_ledger(code=None, since=cursor, limit=page_limit) or []
+            if not page:
+                break
+            before = len(collected)
+            for entry in page:
+                bill = _normalize_okx_bill(entry)
+                key = bill["bill_id"] or f"{bill['type']}:{bill['ts_ms']}:{bill['trade_id']}"
+                collected[key] = bill
+            added = len(collected) - before
+            if len(collected) >= max_bills:
+                capped = True
+                break
+            if len(page) < page_limit:
+                break  # short page → feed exhausted
+            page_last_ts = max((int(e.get("timestamp") or 0) for e in page), default=cursor)
+            if page_last_ts <= cursor and added == 0:
+                # A FULL page that neither advanced the timestamp nor yielded any
+                # new bill: a single-millisecond block larger than page_limit, which
+                # timestamp paging cannot step through without dropping bills. Fail
+                # closed — the Go journal treats `capped` as not-usable for the
+                # cycle rather than silently advancing past the undelivered tail.
+                capped = True
+                break
+            cursor = page_last_ts  # overlap on the boundary ms (dedup absorbs it)
+        else:
+            # Loop ran out of iterations without a feed-drained/cap break: the
+            # returned set is an INCOMPLETE prefix of the feed. Report capped so the
+            # cursor is not advanced past the unfetched tail.
+            capped = True
+        bills = sorted(collected.values(), key=lambda b: b["ts_ms"])
+        if len(bills) > max_bills:
+            bills = bills[:max_bills]
+        return bills, capped
 
     # ─────────────────────────────────────────────
     # Options Protocol methods
