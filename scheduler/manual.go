@@ -303,6 +303,31 @@ func runManualOpen(args []string) int {
 		effectiveATRMult = *sc.StopLossATRMult
 	}
 
+	// #1115: a manual strategy whose close defaults to (or is set to) the regime
+	// ratchet carries no scalar stop_loss_atr_mult (the trailing_stop_atr_regime
+	// block owns the trail), so effectiveATRMult is 0 above. Resolve the per-regime
+	// opening trail at the current regime and feed it to the inline SL arming below
+	// — this is the difference between opening protected and opening NAKED until the
+	// daemon's trailing walker first runs (one strategy interval later). Resolving
+	// before the ATR-fetch block also flips needsATRProtection on so EntryATR is
+	// fetched and stamped for the ratchet path.
+	if effectiveATRMult == 0 && !*recordOnly && strategyUsesTrailingTPRatchetClose(sc) &&
+		sc.TrailingStopATRRegime != nil && sc.TrailingStopATRRegime.IsConfigured() {
+		// Impure step: read the current regime label (spawns the regime subprocess).
+		label := resolveManualRatchetRegimeLabel(sc, cfg, notifier)
+		// Pure step (unit-tested): resolve the per-regime opening trail or fall back
+		// to a protective SL — never returns <= 0, so the position is never armed
+		// naked. The daemon's trailing walker re-pins to the per-regime trail next
+		// cycle, so a CLI-vs-daemon regime mismatch (or a fallback) self-heals.
+		mult, fellBack := manualRatchetOpeningTrailOrFallback(sc.TrailingStopATRRegime, label)
+		effectiveATRMult = mult
+		if fellBack {
+			warnNotifier(notifier, fmt.Sprintf("[manual-open] %s %s: could not resolve the live regime trail (label=%q); arming a fallback SL at %.4g×ATR (daemon re-pins per-regime next cycle)", strategyID, sc.Symbol, label, effectiveATRMult))
+		} else {
+			fmt.Fprintf(os.Stderr, "[manual-open] %s %s: regime=%s → initial trailing SL at %.4g×ATR\n", strategyID, sc.Symbol, label, mult)
+		}
+	}
+
 	// When --atr is omitted, fetch ATR from the same OHLCV/period strategy opens
 	// see via stampEntryATRIfOpened (#689). On fetch failure, fall back to the
 	// leverage-aware heuristic (0.1*fillPrice/leverage = ~10% margin risk at 1× ATR).
@@ -1242,6 +1267,50 @@ func openTradeSide(posSide string) string {
 		return "sell"
 	}
 	return "buy"
+}
+
+// resolveManualRatchetRegimeLabel runs the regime check at manual-open CLI time
+// and returns the current ATR-window regime label for a type=manual strategy
+// whose close evaluator is trailing_tp_ratchet_regime (#1115). Impure — it spawns
+// the regime subprocess (runHyperliquidCheck) with a flat posCtx (the position
+// isn't open yet, so this reads the current/entry regime). Returns "" when the
+// strategy isn't a regime ratchet, regime is disabled, or the check fails; the
+// pure manualRatchetOpeningTrailOrFallback below turns that into a protective
+// fallback so the open is never naked.
+func resolveManualRatchetRegimeLabel(sc StrategyConfig, cfg *Config, notifier *MultiNotifier) string {
+	if cfg == nil || cfg.Regime == nil || !cfg.Regime.Enabled {
+		return ""
+	}
+	if !strategyUsesTrailingTPRatchetClose(sc) || sc.TrailingStopATRRegime == nil || !sc.TrailingStopATRRegime.IsConfigured() {
+		return ""
+	}
+	logger := &StrategyLogger{stratID: sc.ID, writer: os.Stderr}
+	posCtx := positionCtxFromPosition(nil) // flat at open: read the current (entry) regime
+	result, _, _, ok := runHyperliquidCheck(&sc, nil, posCtx, cfg.Regime, notifier, logger)
+	if !ok || result == nil {
+		return ""
+	}
+	payload := regimePayloadValue(result.Regime)
+	return strings.TrimSpace(payload.Label(resolveStrategyRegimeWindow(sc, "atr", cfg.Regime), cfg.Regime))
+}
+
+// manualRatchetOpeningTrailOrFallback resolves the inline opening-trail multiple
+// armed at manual-open for a trailing_tp_ratchet_regime manual (#1115). It NEVER
+// returns <= 0: the per-regime opening trail (fellBack=false) when the resolved
+// regime label indexes a positive distance in the block, otherwise the protective
+// defaultManualStopLossATRMult fallback (fellBack=true) so the position is never
+// armed naked. Pure (no subprocess) so the safety-critical resolve-vs-fallback
+// branch is unit-tested directly — the regime label is resolved upstream by the
+// impure resolveManualRatchetRegimeLabel. Covers: empty label (regime read
+// failed) → fallback; label with no/zero configured trail → fallback; good label
+// → per-regime trail.
+func manualRatchetOpeningTrailOrFallback(block *RegimeATRBlock, label string) (float64, bool) {
+	if block != nil && strings.TrimSpace(label) != "" {
+		if mult, ok := resolveRegimeATR(*block, label); ok && mult > 0 {
+			return mult, false
+		}
+	}
+	return defaultManualStopLossATRMult, true
 }
 
 // runManualCloseEval runs the close-evaluator loop for a single type=manual
