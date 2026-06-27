@@ -56,9 +56,43 @@ VALID_LABELS_COMPOSITE = frozenset({
     "ranging_quiet",
     "ranging_volatile",
     "ranging_directional",
+    # #1124: directional-drift ranging substates. map_composite_label names the
+    # drift via return_eff's sign; bare ranging_directional stays valid for the
+    # exactly-zero case.
+    "ranging_directional_up",
+    "ranging_directional_down",
 })
 # Back-compat alias for ADX-only callers
 _VALID_LABELS = VALID_LABELS_ADX
+
+# #1124: the bare `ranging_directional` label is the parent of the directional
+# family — the producer emits the bare label only at exactly return_eff == 0
+# (rare on real price data) and the `_up`/`_down` sub-labels for any non-zero
+# drift. The family rule is one-directional for entry gates and exhaustiveness:
+# a bare `ranging_directional` covers its `_up`/`_down` sub-labels, never the
+# reverse. Mirrors the Go regimeDirectionalBare / regimeDirectionalSubs.
+RANGING_DIRECTIONAL_BARE = "ranging_directional"
+RANGING_DIRECTIONAL_SUBS = frozenset({"ranging_directional_up", "ranging_directional_down"})
+
+
+def regime_label_allows_entry(allowed, current: str) -> bool:
+    """#1124 entry-gate family match.
+
+    True when ``current`` is explicitly in ``allowed`` OR when ``current`` is a
+    directional sub-label (``_up``/``_down``) and the bare ``ranging_directional``
+    parent is in ``allowed``. Expansion is one-directional (bare→subs), so an
+    operator listing an explicit ``_up`` still gates out ``_down``. Empty
+    ``allowed`` (no gate) or empty ``current`` (no regime available) allow entry,
+    matching the Go ``regimeAllowsEntry`` contract for parity.
+    """
+    if not allowed or not current:
+        return True
+    if current in allowed:
+        return True
+    if current in RANGING_DIRECTIONAL_SUBS and RANGING_DIRECTIONAL_BARE in allowed:
+        return True
+    return False
+
 
 _DEFAULT_COMPOSITE_THRESHOLDS = {
     "return_pct": 0.05,
@@ -168,7 +202,16 @@ def map_composite_label(
         return "trending_down_clean" if clean else "trending_down_choppy"
     # No decisive net move → ranging family.
     if high_adx:
-        # Directional pressure without net follow-through.
+        # Directional pressure without net follow-through (#1124). return_eff's
+        # sign names the drift so the label carries direction, mirroring the
+        # trending family's _up/_down split. Bare ranging_directional is the
+        # producer-side fallback for the exactly-zero case (a common path here,
+        # since big_move is false so return_eff is frequently near zero) — so
+        # back-compat lives in this SSoT, not in each downstream resolver.
+        if return_eff > 0:
+            return "ranging_directional_up"
+        if return_eff < 0:
+            return "ranging_directional_down"
         return "ranging_directional"
     if wide:
         return "ranging_volatile"

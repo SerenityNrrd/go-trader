@@ -125,6 +125,15 @@ func ratchetCloseDefaultGroup(label string) (string, bool) {
 	switch l {
 	case "ranging_quiet", "ranging_volatile", "ranging_directional":
 		return l, true
+	case "ranging_directional_up", "ranging_directional_down":
+		// #1124: the directional-drift substates share the ranging_directional
+		// scale-out ladder (the geometry is direction-agnostic — the SL side
+		// carries direction, the TP scale-out does not). Map them to that group
+		// explicitly; otherwise they fall through to regimeCloseDefaultGroup's
+		// "ranging" key, which has NO ratchet ladder in ratchetTierGroupDefaults
+		// → defaultTrailingRatchetTiersForRegime returns nil → silent never-arm
+		// of the auto-protective ratchet exit (money path).
+		return "ranging_directional", true
 	case "ranging":
 		return "ranging_quiet", true
 	}
@@ -263,9 +272,18 @@ func trailingRatchetTiersForRegime(sc StrategyConfig, regime string) []trailingR
 			if !ok || strings.TrimSpace(regime) == "" {
 				return nil
 			}
-			block, ok := table[strings.TrimSpace(regime)]
+			key := strings.TrimSpace(regime)
+			block, ok := table[key]
 			if !ok {
-				return nil
+				// #1124: sub-label stamp falls back to the bare
+				// ranging_directional tier ladder (exact key wins first, so an
+				// explicit sub key still overrides bare).
+				if regimeDirectionalSubs[key] {
+					block, ok = table[regimeDirectionalBare]
+				}
+				if !ok {
+					return nil
+				}
 			}
 			tiers, _ := parseTrailingRatchetTierList(block, ref.Name+".tp_tiers."+regime)
 			return tiers
@@ -409,9 +427,16 @@ func validateTrailingTPRatchetClose(sc StrategyConfig, labels []string, regimeEn
 					errs = append(errs, fmt.Sprintf("%s.tp_tiers: unknown regime key %q (valid: %s)", sub, key, strings.Join(labels, ", ")))
 				}
 			}
+			bareDirectional := table[regimeDirectionalBare] != nil
 			for _, key := range labels {
 				block, ok := table[key]
 				if !ok {
+					// #1124 family rule: bare ranging_directional covers the
+					// _up/_down sub-labels for exhaustiveness (the explicit
+					// tp_tiers resolver falls back bare→sub at runtime).
+					if regimeLabelFamilyCovered(key, bareDirectional) {
+						continue
+					}
 					errs = append(errs, fmt.Sprintf("%s.tp_tiers: missing required regime key %q", sub, key))
 					continue
 				}

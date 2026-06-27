@@ -136,6 +136,20 @@ func regimeLabelsForClassifier(classifier string) []string {
 			"ranging_quiet",
 			"ranging_volatile",
 			"ranging_directional",
+			// #1124: directional-drift ranging substates. Adding them to the
+			// classifier vocabulary makes them valid keys for allowed_regimes
+			// gating, regime_directional_policy and *_atr_regime blocks. Under
+			// the #1124 family rule, a present bare ranging_directional covers
+			// its _up/_down subs across every exhaustiveness validator, so a
+			// pre-#1124 explicit (non-use_defaults) trend_regime block that has
+			// the bare label but omits the subs still loads fine (no config
+			// changes required). Exhaustiveness stays fail-closed: a label
+			// errors at load with "missing required regime labels" only when
+			// neither it nor its bare family parent is present — e.g. an
+			// explicit block listing _up/_down but omitting bare is rejected
+			// (the family rule is one-directional: bare→subs, never subs→bare).
+			"ranging_directional_up",
+			"ranging_directional_down",
 		}
 	default:
 		return append([]string(nil), canonicalTrendRegimeLabels...)
