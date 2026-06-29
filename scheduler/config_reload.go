@@ -45,6 +45,10 @@ func applyHotReloadConfig(cfg, next *Config, state *AppState, notifier *MultiNot
 		addChange("manual_defaults: %s -> %s", formatManualDefaults(cfg.ManualDefaults), formatManualDefaults(next.ManualDefaults))
 		cfg.ManualDefaults = cloneManualDefaults(next.ManualDefaults)
 	}
+	if !reflect.DeepEqual(cfg.UserCloseDefaults, next.UserCloseDefaults) {
+		addChange("user_close_defaults: updated")
+		cfg.UserCloseDefaults = cloneCloseDefaultsMap(next.UserCloseDefaults)
+	}
 
 	// #1062: regime.display_windows hot-reloads (display-only summary filter).
 	// validateHotReloadCompatible masked it but rejects any other regime change,
@@ -170,6 +174,14 @@ func applyHotReloadConfig(cfg, next *Config, state *AppState, notifier *MultiNot
 			if ns.StopLossATRMult == nil || *ns.StopLossATRMult <= 0 {
 				clearATRMultMissingEntryATRWarningsForStrategy(sc.ID)
 			}
+		}
+		if !sc.StopLossATRRegime.EqualForReload(ns.StopLossATRRegime) {
+			addChange("strategy[%s].stop_loss_atr_regime: shape updated", sc.ID)
+			sc.StopLossATRRegime = cloneRegimeATRBlock(ns.StopLossATRRegime)
+		}
+		if !sc.TrailingStopATRRegime.EqualForReload(ns.TrailingStopATRRegime) {
+			addChange("strategy[%s].trailing_stop_atr_regime: shape updated", sc.ID)
+			sc.TrailingStopATRRegime = cloneRegimeATRBlock(ns.TrailingStopATRRegime)
 		}
 		if !floatPtrEqual(sc.TrailingStopMinMovePct, ns.TrailingStopMinMovePct) {
 			addChange("strategy[%s].trailing_stop_min_move_pct: %s -> %s", sc.ID, formatFloatPtrPct(sc.TrailingStopMinMovePct), formatFloatPtrPct(ns.TrailingStopMinMovePct))
@@ -463,17 +475,17 @@ func validateHotReloadStateCompatible(cfg, next *Config, state *AppState) error 
 			errs = append(errs, fmt.Sprintf("strategy[%s] margin_mode changed with open positions (%q -> %q; flatten first or restart after close)",
 				sc.ID, sc.MarginMode, ns.MarginMode))
 		}
-		if sc.Type == "perps" && sc.Platform == "hyperliquid" && strategyHasOpenPositions(stateStrategy(state, sc.ID)) {
+		if hyperliquidManagedStopReloadGuard(sc) && strategyHasOpenPositions(stateStrategy(state, sc.ID)) {
 			oldTrailing := sc.TrailingStopPct != nil && *sc.TrailingStopPct > 0
 			newTrailing := ns.TrailingStopPct != nil && *ns.TrailingStopPct > 0
 			if oldTrailing != newTrailing {
 				errs = append(errs, fmt.Sprintf("strategy[%s] trailing_stop_pct mode changed with open positions (flatten first or restart after close)",
 					sc.ID))
 			}
-			// #505: ATR-derived trailing stop pct is computed once per
-			// position from the entry ATR; toggling the mode mid-position
-			// would mix two distance regimes against the same on-chain
-			// trigger. Treat exactly like trailing_stop_pct.
+			// #505/#1115: ATR-derived trailing stop pct is computed once per
+			// position from the entry ATR; toggling the mode mid-position would
+			// mix two distance regimes against the same on-chain trigger. Applies
+			// to both HL perps and HL manual protection.
 			oldATR := sc.TrailingStopATRMult != nil && *sc.TrailingStopATRMult > 0
 			newATR := ns.TrailingStopATRMult != nil && *ns.TrailingStopATRMult > 0
 			if oldATR != newATR {
@@ -503,7 +515,7 @@ func validateHotReloadStateCompatible(cfg, next *Config, state *AppState) error 
 			if oldFixedRegime != newFixedRegime {
 				errs = append(errs, fmt.Sprintf("strategy[%s] stop_loss_atr_regime mode changed with open positions (flatten first or restart after close)",
 					sc.ID))
-			} else if oldFixedRegime && !sc.StopLossATRRegime.EqualForReload(ns.StopLossATRRegime) {
+			} else if oldFixedRegime && !sc.StopLossATRRegime.EqualEffectiveForReload(ns.StopLossATRRegime) {
 				errs = append(errs, fmt.Sprintf("strategy[%s] stop_loss_atr_regime shape changed with open positions (flatten first or restart after close)",
 					sc.ID))
 			}
@@ -512,7 +524,7 @@ func validateHotReloadStateCompatible(cfg, next *Config, state *AppState) error 
 			if oldTrailingRegime != newTrailingRegime {
 				errs = append(errs, fmt.Sprintf("strategy[%s] trailing_stop_atr_regime mode changed with open positions (flatten first or restart after close)",
 					sc.ID))
-			} else if oldTrailingRegime && !sc.TrailingStopATRRegime.EqualForReload(ns.TrailingStopATRRegime) {
+			} else if oldTrailingRegime && !sc.TrailingStopATRRegime.EqualEffectiveForReload(ns.TrailingStopATRRegime) {
 				errs = append(errs, fmt.Sprintf("strategy[%s] trailing_stop_atr_regime shape changed with open positions (flatten first or restart after close)",
 					sc.ID))
 			}
@@ -760,6 +772,10 @@ func stateStrategy(state *AppState, id string) *StrategyState {
 		return nil
 	}
 	return state.Strategies[id]
+}
+
+func hyperliquidManagedStopReloadGuard(sc StrategyConfig) bool {
+	return sc.Platform == "hyperliquid" && (sc.Type == "perps" || sc.Type == "manual")
 }
 
 func strategyHasOpenPositions(s *StrategyState) bool {

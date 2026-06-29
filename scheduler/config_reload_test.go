@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"reflect"
 	"strings"
 	"sync"
@@ -1380,6 +1381,189 @@ func TestApplyHotReloadConfigPropagatesManualDefaults(t *testing.T) {
 	if got := cfg.resolveManualMarginUSD(); got != 125.0 {
 		t.Errorf("cfg margin aliased to next: got %g after next-mutation, want 125.0", got)
 	}
+}
+
+func TestApplyHotReloadConfigCopiesFlatRegimeTrailAndUserCloseDefaults(t *testing.T) {
+	oldTrail := &RegimeATRBlock{TrendRegime: map[string]RegimeATREntry{
+		"trending_up":   {ATR: 2.0},
+		"trending_down": {ATR: 2.0},
+		"ranging":       {ATR: 1.0},
+	}}
+	newTrail := &RegimeATRBlock{TrendRegime: map[string]RegimeATREntry{
+		"trending_up":   {ATR: 2.75},
+		"trending_down": {ATR: 2.75},
+		"ranging":       {ATR: 1.5},
+	}}
+	strategy := func(block *RegimeATRBlock) StrategyConfig {
+		return StrategyConfig{
+			ID: "hl-eth", Type: "perps", Platform: "hyperliquid",
+			Script:                "shared_scripts/check_hyperliquid.py",
+			Args:                  []string{"sma_crossover", "ETH", "1h", "--mode=paper"},
+			CloseStrategy:         &StrategyRef{Name: trailingTPRatchetRegimeCloseName},
+			TrailingStopATRRegime: block,
+			Capital:               1000,
+			MaxDrawdownPct:        10,
+			Leverage:              1,
+		}
+	}
+	cfg := minimalReloadConfig([]StrategyConfig{strategy(oldTrail)})
+	next := minimalReloadConfig([]StrategyConfig{strategy(newTrail)})
+	next.UserCloseDefaults = CloseDefaultsMap{
+		trailingTPRatchetRegimeCloseName: {
+			"tp_tiers":                 ratchetRegimeUserTiers(),
+			"trailing_stop_atr_regime": ratchetRegimeTrailRaw(2.75, 2.75, 1.5),
+		},
+	}
+	state := &AppState{Strategies: map[string]*StrategyState{
+		"hl-eth": {ID: "hl-eth", Positions: map[string]*Position{}},
+	}}
+
+	changes, err := applyHotReloadConfig(cfg, next, state, nil, nil)
+	if err != nil {
+		t.Fatalf("applyHotReloadConfig: %v", err)
+	}
+	joined := strings.Join(changes, "\n")
+	if !strings.Contains(joined, "trailing_stop_atr_regime") {
+		t.Fatalf("changes missing trailing_stop_atr_regime update: %v", changes)
+	}
+	if !strings.Contains(joined, "user_close_defaults") {
+		t.Fatalf("changes missing user_close_defaults update: %v", changes)
+	}
+	got, ok := resolveRegimeATR(*cfg.Strategies[0].TrailingStopATRRegime, "ranging")
+	if !ok || got != 1.5 {
+		t.Fatalf("reloaded ranging trail = (%g, %v), want (1.5, true)", got, ok)
+	}
+	next.Strategies[0].TrailingStopATRRegime.TrendRegime["ranging"] = RegimeATREntry{ATR: 9.0}
+	got, ok = resolveRegimeATR(*cfg.Strategies[0].TrailingStopATRRegime, "ranging")
+	if !ok || got != 1.5 {
+		t.Fatalf("reloaded trail aliases next after mutation: (%g, %v)", got, ok)
+	}
+	next.UserCloseDefaults[trailingTPRatchetRegimeCloseName]["trailing_stop_atr_regime"] = map[string]interface{}{"use_defaults": true}
+	raw := cfg.UserCloseDefaults[trailingTPRatchetRegimeCloseName]["trailing_stop_atr_regime"].(map[string]interface{})
+	if _, ok := raw["use_defaults"]; ok {
+		t.Fatal("cfg.UserCloseDefaults aliases next after reload")
+	}
+}
+
+func TestApplyHotReloadConfigRejectsUserCloseDefaultRegimeTrailChangeWithOpenPosition(t *testing.T) {
+	cases := []struct {
+		name     string
+		id       string
+		strategy string
+	}{
+		{
+			name: "perps",
+			id:   "hl-eth",
+			strategy: `{
+				"id": "hl-eth",
+				"type": "perps",
+				"platform": "hyperliquid",
+				"script": "shared_scripts/check_hyperliquid.py",
+				"args": ["sma_crossover", "ETH", "1h", "--mode=paper"],
+				"capital": 1000,
+				"leverage": 1,
+				"max_drawdown_pct": 20,
+				"close_strategy": {"name": "trailing_tp_ratchet_regime", "params": {"use_defaults": true}}
+			}`,
+		},
+		{
+			name: "manual",
+			id:   "hl-manual-eth",
+			strategy: `{
+				"id": "hl-manual-eth",
+				"type": "manual",
+				"platform": "hyperliquid",
+				"symbol": "ETH",
+				"timeframe": "1h",
+				"capital": 1000,
+				"leverage": 1,
+				"max_drawdown_pct": 20
+			}`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := loadUserDefaultRatchetRegimeReloadConfig(t, tc.strategy, explicitUserDefaultTrailJSON(2.5, 2.5, 2.0))
+			next := loadUserDefaultRatchetRegimeReloadConfig(t, tc.strategy, explicitUserDefaultTrailJSON(2.5, 2.5, 1.5))
+
+			_, err := applyHotReloadConfig(cfg, next, openETHReloadState(tc.id), nil, nil)
+			if err == nil {
+				t.Fatal("expected open-position reload to reject changed user_close_defaults trailing_stop_atr_regime")
+			}
+			if !strings.Contains(err.Error(), "trailing_stop_atr_regime shape changed with open positions") {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
+func TestApplyHotReloadConfigAllowsUserCloseDefaultRegimeTrailEquivalentEditWithOpenPosition(t *testing.T) {
+	strategy := `{
+		"id": "hl-eth",
+		"type": "perps",
+		"platform": "hyperliquid",
+		"script": "shared_scripts/check_hyperliquid.py",
+		"args": ["sma_crossover", "ETH", "1h", "--mode=paper"],
+		"capital": 1000,
+		"leverage": 1,
+		"max_drawdown_pct": 20,
+		"close_strategy": {"name": "trailing_tp_ratchet_regime", "params": {"use_defaults": true}}
+	}`
+	cfg := loadUserDefaultRatchetRegimeReloadConfig(t, strategy, explicitUserDefaultTrailJSON(2.5, 2.5, 2.0))
+	next := loadUserDefaultRatchetRegimeReloadConfig(t, strategy, `{"use_defaults": true}`)
+
+	changes, err := applyHotReloadConfig(cfg, next, openETHReloadState("hl-eth"), nil, nil)
+	if err != nil {
+		t.Fatalf("applyHotReloadConfig rejected equivalent effective trail: %v", err)
+	}
+	if cfg.Strategies[0].TrailingStopATRRegime == nil || !cfg.Strategies[0].TrailingStopATRRegime.UseDefaults {
+		t.Fatalf("equivalent trail edit was not copied into cfg: %#v", cfg.Strategies[0].TrailingStopATRRegime)
+	}
+	joined := strings.Join(changes, "\n")
+	if !strings.Contains(joined, "trailing_stop_atr_regime") || !strings.Contains(joined, "user_close_defaults") {
+		t.Fatalf("changes=%v, want trailing_stop_atr_regime and user_close_defaults entries", changes)
+	}
+}
+
+func loadUserDefaultRatchetRegimeReloadConfig(t *testing.T, strategyJSON, trailJSON string) *Config {
+	t.Helper()
+	cfgJSON := fmt.Sprintf(`{
+		"regime": {"enabled": true, "period": 14, "adx_threshold": 20},
+		"user_close_defaults": {
+			"trailing_tp_ratchet_regime": {
+				"tp_tiers": {
+					"trending_up": [{"atr_multiple": 1.0, "trailing_mult_after": 1.0, "close_fraction": 0.0}],
+					"trending_down": [{"atr_multiple": 1.0, "trailing_mult_after": 1.0, "close_fraction": 0.0}],
+					"ranging": [{"atr_multiple": 1.0, "trailing_mult_after": 1.0, "close_fraction": 0.0}]
+				},
+				"trailing_stop_atr_regime": %s
+			}
+		},
+		"strategies": [%s]
+	}`, trailJSON, strategyJSON)
+	cfg, err := LoadConfig(writeTestConfig(t, t.TempDir(), cfgJSON))
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	return cfg
+}
+
+func explicitUserDefaultTrailJSON(up, down, ranging float64) string {
+	return fmt.Sprintf(`{
+		"trend_regime": {
+			"trending_up": {"atr_multiple": %g},
+			"trending_down": {"atr_multiple": %g},
+			"ranging": {"atr_multiple": %g}
+		}
+	}`, up, down, ranging)
+}
+
+func openETHReloadState(strategyID string) *AppState {
+	return &AppState{Strategies: map[string]*StrategyState{
+		strategyID: {ID: strategyID, Positions: map[string]*Position{
+			"ETH": {Symbol: "ETH", Quantity: 0.5, AvgCost: 3000, Side: "long"},
+		}},
+	}}
 }
 
 // #696: empty tp_tiers array is rejected by validation; LoadConfig surfaces
