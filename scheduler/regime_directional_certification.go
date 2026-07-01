@@ -429,3 +429,109 @@ func directionalCertSignMismatches(sc StrategyConfig, certStates map[string]stri
 	sort.Strings(out)
 	return out
 }
+
+// directionalCertStartupLinesNeedingOwnerDM filters startup-summary lines that
+// should reach the owner DM (#1157): DEFAULT-OFF, EXPIRED, or unresolvable
+// policy cells. Active certification lines are informational stdout only.
+func directionalCertStartupLinesNeedingOwnerDM(lines []string) []string {
+	var out []string
+	for _, line := range lines {
+		if strings.Contains(line, "DEFAULT-OFF") ||
+			strings.Contains(line, "EXPIRED") ||
+			strings.Contains(line, "policy inert") {
+			out = append(out, line)
+		}
+	}
+	return out
+}
+
+// directionalCertOwnerDMSnapshot canonicalizes the filtered owner-DM payload so
+// unchanged certification state can be deduped across startup/SIGHUP (#1157).
+func directionalCertOwnerDMSnapshot(lines []string) string {
+	filtered := directionalCertStartupLinesNeedingOwnerDM(lines)
+	if len(filtered) == 0 {
+		return ""
+	}
+	cp := append([]string(nil), filtered...)
+	sort.Strings(cp)
+	return strings.Join(cp, "\n")
+}
+
+var (
+	directionalCertOwnerDMMu       sync.Mutex
+	directionalCertOwnerDMLastSnap string
+)
+
+// notifyDirectionalCertStartupSummary forwards filtered #1085 startup-summary
+// lines to the owner DM so uncertified policy is visible outside boot stdout.
+// Identical filtered snapshots are deduped so repeated SIGHUPs (e.g. after
+// Discord config edits) do not spam the owner. When the snapshot changes,
+// only lines absent from the prior snapshot are DM'd, except on a fresh
+// degradation (prior snapshot empty → all filtered lines).
+func notifyDirectionalCertStartupSummary(notifier *MultiNotifier, lines []string) {
+	if notifier == nil || !notifier.HasOwner() {
+		return
+	}
+	filtered := directionalCertStartupLinesNeedingOwnerDM(lines)
+	snap := directionalCertOwnerDMSnapshot(lines)
+	directionalCertOwnerDMMu.Lock()
+	if snap == directionalCertOwnerDMLastSnap {
+		directionalCertOwnerDMMu.Unlock()
+		return
+	}
+	prevSnap := directionalCertOwnerDMLastSnap
+	directionalCertOwnerDMLastSnap = snap
+	directionalCertOwnerDMMu.Unlock()
+
+	if snap == "" {
+		return
+	}
+	toSend := filtered
+	if prevSnap != "" {
+		prevSet := make(map[string]struct{}, strings.Count(prevSnap, "\n")+1)
+		for _, line := range strings.Split(prevSnap, "\n") {
+			prevSet[line] = struct{}{}
+		}
+		toSend = nil
+		for _, line := range filtered {
+			if _, seen := prevSet[line]; !seen {
+				toSend = append(toSend, line)
+			}
+		}
+	}
+	for _, line := range toSend {
+		notifier.SendOwnerDM("[state] " + line)
+	}
+}
+
+// directionalCertOperatorNotes returns a compact operator suffix for status
+// surfaces (Discord /status) listing strategies whose directional policy is not
+// actively certified. Empty when every configured policy is CertActive.
+func directionalCertOperatorNotes(strategies []StrategyConfig, rc *RegimeConfig) string {
+	if len(strategies) == 0 {
+		return ""
+	}
+	now := time.Now().UTC()
+	cfg := &Config{Regime: rc}
+	var parts []string
+	for _, sc := range strategies {
+		if !sc.RegimeDirectionalPolicy.IsConfigured() {
+			continue
+		}
+		switch strategyDirectionalCertStatus(sc, rc, now) {
+		case CertActive:
+			continue
+		case CertExpired:
+			_, cell := directionalCertInspectStatus(sc, cfg)
+			parts = append(parts, fmt.Sprintf("%s=EXPIRED %s", sc.ID, cell))
+		default:
+			_, cell := directionalCertInspectStatus(sc, cfg)
+			parts = append(parts, fmt.Sprintf("%s=DEFAULT-OFF %s", sc.ID, cell))
+		}
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	sort.Strings(parts)
+	return " | directional_policy: " + strings.Join(parts, "; ")
+}
