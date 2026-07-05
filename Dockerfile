@@ -15,20 +15,18 @@ RUN cd scheduler && \
     go build -ldflags "-X main.Version=${VERSION}" -o /out/go-trader .
 
 # ---------- runtime stage ----------
-FROM python:3.12-slim-bookworm AS runtime
+# Official uv image = Python + uv preinstalled, no network fetch for the installer.
+FROM ghcr.io/astral-sh/uv:python3.12-bookworm AS runtime
 
-# uv (locked version, matches local dev)
-ADD https://astral.sh/uv/0.5.11/install.sh /tmp/uv-install.sh
-RUN sh /tmp/uv-install.sh && rm /tmp/uv-install.sh && \
-    apt-get update && apt-get install -y --no-install-recommends \
+RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates curl tini && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Python deps (cached unless pyproject/lock change)
+# Python deps (cached unless pyproject/lock change). uv is already on PATH.
 COPY pyproject.toml uv.lock ./
-RUN /root/.local/bin/uv sync --frozen --no-dev
+RUN uv sync --frozen --no-dev
 
 # App source + compiled Go binary
 COPY --from=builder /out/go-trader /usr/local/bin/go-trader
