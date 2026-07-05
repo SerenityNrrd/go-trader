@@ -6,10 +6,6 @@ services:
     image: go-trader:latest
     container_name: go-trader
     restart: unless-stopped
-    # Match systemd RestartSec=10
-    restart_policy:
-      condition: any
-      delay: 10s
 
     env_file:
       # DISCORD_BOT_TOKEN + any secrets. Created on the host once.
