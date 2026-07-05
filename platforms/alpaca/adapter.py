@@ -25,8 +25,10 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'
 def _alpaca_ccxt_config() -> dict:
     """Build a ccxt.alpaca config from environment. Paper endpoint by default."""
     cfg = {"enableRateLimit": True}
-    key = os.environ.get("ALPACA_API_KEY", "")
-    secret = os.environ.get("ALPACA_API_SECRET", "")
+    # Accept both naming conventions: ALPACA_API_KEY (verbose) and
+    # ALPACA_KEY (terse). Verbose wins on conflict.
+    key = os.environ.get("ALPACA_API_KEY") or os.environ.get("ALPACA_KEY") or ""
+    secret = os.environ.get("ALPACA_API_SECRET") or os.environ.get("ALPACA_SECRET") or ""
     if key and secret:
         cfg["apiKey"] = key
         cfg["secret"] = secret
@@ -56,8 +58,8 @@ class AlpacaExchangeAdapter:
         self._exchange = _make_exchange()
         self._markets_loaded = False
         self._is_live = (
-            bool(os.environ.get("ALPACA_API_KEY"))
-            and bool(os.environ.get("ALPACA_API_SECRET"))
+            (bool(os.environ.get("ALPACA_API_KEY")) or bool(os.environ.get("ALPACA_KEY")))
+            and (bool(os.environ.get("ALPACA_API_SECRET")) or bool(os.environ.get("ALPACA_SECRET")))
             and os.environ.get("ALPACA_PAPER", "1") == "0"
         )
 
