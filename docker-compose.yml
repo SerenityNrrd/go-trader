@@ -18,9 +18,9 @@ services:
       - /home/angrynrrd/go_trader/logs:/app/logs
 
     ports:
-      # Status / UI server (DefaultStatusPort=8099). Loopback-bound in-app;
-      # expose on the host only if you want remote access (use a reverse proxy).
-      - "8099:8099"
+      # Status / UI server (in-app DefaultStatusPort=8099). Host-side collision?
+      # Change only the LEFT number (host:container).
+      - "8199:8099"
 
     # Coolify healthcheck hits /health (503 while draining)
     healthcheck:
