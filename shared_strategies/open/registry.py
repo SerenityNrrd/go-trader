@@ -54,6 +54,7 @@ from regime_adaptive_htf import regime_adaptive_htf_core
 from session_breakout import session_breakout_core
 from vwap_rejection_st import vwap_rejection_st_core
 from vol_momentum import vol_momentum_core
+from rsi_momentum import rsi_momentum_core
 from anchored_vwap import anchored_vwap_core
 from anchored_vwap_channel import anchored_vwap_channel_core
 from anchored_vwap_reversion import anchored_vwap_reversion_core
@@ -1323,6 +1324,19 @@ def regime_adaptive_strategy(df: pd.DataFrame, **params) -> pd.DataFrame:
 
 
 @register(
+    "rsi_momentum",
+    "RSI Momentum — trend-following using RSI 50 as momentum divider; Signal A: RSI crosses above RSI_EMA while RSI_EMA > 50; Signal B: RSI retests 50 zone after being above 56; filtered by 200 EMA",
+    {
+        "rsi_period": 14,
+        "rsi_ema_period": 9,
+        "trend_ema_period": 200,
+    },
+)
+def rsi_momentum_strategy(df: pd.DataFrame, **params) -> pd.DataFrame:
+    return rsi_momentum_core(df, **params)
+
+
+@register(
     "regime_adaptive_htf",
     "Regime Adaptive HTF — selective z-score fades gated by composite regime labels (return/range/Kaufman efficiency + ADX) classified on higher-timeframe buckets with confirmation hysteresis; optional clean-trend entry modes; flat in chop and directional grinds",
     {
@@ -1385,7 +1399,7 @@ PLATFORM_ORDER: Dict[str, List[str]] = {
         "sweep_squeeze_combo", "adx_trend", "donchian_breakout", "tema_cross",
         "momentum_pro", "mean_reversion_pro", "atr_band_revert", "mtf_confluence",
         "vol_momentum", "regime_adaptive", "regime_adaptive_htf",
-        "analog_retrieval",
+        "rsi_momentum", "analog_retrieval",
         "hold",
     ],
     "futures": [
