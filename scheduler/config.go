@@ -1096,6 +1096,12 @@ func loadConfig(path string, skipLiveCredentialChecks bool) (*Config, error) {
 				cfg.Strategies[i].Platform = "okx"
 			case strings.HasPrefix(cfg.Strategies[i].ID, "alpaca-"):
 				cfg.Strategies[i].Platform = "alpaca"
+			case strings.HasPrefix(cfg.Strategies[i].ID, "coinbase-"):
+				cfg.Strategies[i].Platform = "coinbase"
+			case strings.HasPrefix(cfg.Strategies[i].ID, "kraken-"):
+				cfg.Strategies[i].Platform = "kraken"
+			case strings.HasPrefix(cfg.Strategies[i].ID, "apex-"):
+				cfg.Strategies[i].Platform = "apex"
 			case cfg.Strategies[i].Type == "options":
 				cfg.Strategies[i].Platform = "deribit"
 			default:

@@ -1859,12 +1859,46 @@ func main() {
 									}
 								}
 								if !liveExecFailed {
-									mu.Lock()
-									trades, detail = executeRobinhoodResult(sc, stratState, stateDB, result, execResult, signalStr, price, cfg.Regime, logger)
-									mu.Unlock()
+								mu.Lock()
+								trades, detail = executeRobinhoodResult(sc, stratState, stateDB, result, execResult, signalStr, price, cfg.Regime, logger)
+								mu.Unlock()
+							}
+						}
+					} else if isCCXTSpotStrategy(sc) {
+						// Generic CCXT path (check_ccxt.py): one script for any
+						// ccxt-supported exchange (binanceus, alpaca, coinbase,
+						// kraken, apex, …). Spot-only. Live orders via --execute.
+						if result, signalStr, price, ok := runSpotCheck(sc, prices, spotPosCtx, cfg.Regime, notifier, logger); ok {
+							prices[result.Symbol] = price
+							storeRegime := globalRegimeStore.PayloadForStrategy(sc, cfg.Regime)
+							result.Regime = &storeRegime
+							if gateRegime, regimeBlocked := applyRegimeGate(sc, storeRegime, cfg.Regime, spotPosCtx.Quantity); regimeBlocked {
+								logger.Info("Regime gate: open signal blocked (regime=%s)", gateRegime)
+								result.Signal = 0
+							}
+							if sc.Paused && pausedBlocksSignal(result.Signal, result.CloseFraction, spotPosCtx.Quantity, spotPosCtx.Side, true, false) {
+								logger.Info("Paused: %s signal suppressed — position-increasing actions held while paused (#1150)", signalStr)
+								result.Signal = 0
+							}
+							mu.Lock()
+							syncStrategyRegimeState(stratState, storeRegime, cfg.Regime)
+							mu.Unlock()
+							var execResult *CCXTExecuteResult
+							liveExecFailed := false
+							if ccxtIsLive(sc.Args) && result.Signal != 0 {
+								if er, ok2 := runCCXTExecuteOrder(sc, result, price, stratState.Cash, spotPosCtx.Quantity, spotPosCtx.Side, notifier, logger); ok2 {
+									execResult = er
+								} else {
+									liveExecFailed = true
 								}
 							}
-						} else if result, signalStr, price, ok := runSpotCheck(sc, prices, spotPosCtx, cfg.Regime, notifier, logger); ok {
+							if !liveExecFailed {
+								mu.Lock()
+								trades, detail = executeCCXTResult(sc, stratState, stateDB, result, execResult, signalStr, price, cfg.Regime, logger)
+								mu.Unlock()
+							}
+						}
+					} else if result, signalStr, price, ok := runSpotCheck(sc, prices, spotPosCtx, cfg.Regime, notifier, logger); ok {
 							// #879: single-source regime — read the global store for this
 							// strategy's signature instead of the check output, and point
 							// result.Regime at it so stamp-at-open inside execute* shares it.
