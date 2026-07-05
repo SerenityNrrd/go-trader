@@ -21,6 +21,9 @@ scheduler/state.db
 .claude/
 local/
 
+# Container build artifacts (keep Dockerfile + docker-compose.yml tracked)
+# nothing to ignore by default
+
 # macOS
 .DS_Store
 architecture.md

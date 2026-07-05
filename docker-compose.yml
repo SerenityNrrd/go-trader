@@ -1,0 +1,42 @@
+services:
+  go-trader:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: go-trader:latest
+    container_name: go-trader
+    restart: unless-stopped
+    # Match systemd RestartSec=10
+    restart_policy:
+      condition: any
+      delay: 10s
+
+    env_file:
+      # DISCORD_BOT_TOKEN + any secrets. Created on the host once.
+      - /home/angrynrrd/go_trader/.env
+
+    volumes:
+      # Persistent config + state DB (out-of-tree #1056 layout)
+      - /home/angrynrrd/go_trader:/var/lib/go-trader
+      # Logs (optional — comment out to keep logs in docker logs only)
+      - /home/angrynrrd/go_trader/logs:/app/logs
+
+    ports:
+      # Status / UI server (DefaultStatusPort=8099). Loopback-bound in-app;
+      # expose on the host only if you want remote access (use a reverse proxy).
+      - "8099:8099"
+
+    # Coolify healthcheck hits /health (503 while draining)
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8099/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+
+    # Mirror systemd hardening where Docker allows
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:size=64M   # HL meta/OHLCV caches (PrivateTmp equivalent)
+    read_only: false    # /app/.venv and /var/lib/go-trader need writes

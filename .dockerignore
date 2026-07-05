@@ -1,0 +1,47 @@
+# VCS
+.git
+.gitignore
+.gitattributes
+.github/
+
+# Python caches / venvs (built inside the image)
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local state — must never bake into the image
+*.db
+*.db-wal
+*.db-shm
+*.db.lock
+scheduler/state.db
+scheduler/state.json
+scheduler/config.json
+.env
+logs/
+
+# Editor / OS
+.DS_Store
+.vscode/
+.idea/
+
+# Docs / notebooks not needed at runtime
+notebooks/
+archive/
+docs/
+*.md
+!scheduler/README.md
+
+# Worktrees, agent scratch
+.worktrees/
+.claude/
+local/
+AGENTS.generated.md
+
+# Backtest research output (regenerable)
+backtest/consolidation_out/
