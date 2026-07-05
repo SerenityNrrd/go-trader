@@ -165,17 +165,29 @@ func resolveStatusPort(cliFlag, cfgPort int) int {
 	return DefaultStatusPort
 }
 
-// bindWithFallback tries to bind localhost:port, then port+1, ..., up to
+// statusBindHost returns the host the status server should bind to.
+// Defaults to "localhost" (loopback-only, the long-standing security
+// boundary). Container deployments behind a reverse proxy set
+// GO_TRADER_STATUS_BIND=0.0.0.0 to opt out.
+func statusBindHost() string {
+	if h := os.Getenv("GO_TRADER_STATUS_BIND"); h != "" {
+		return h
+	}
+	return "localhost"
+}
+
+// bindWithFallback tries to bind <host>:port, then port+1, ..., up to
 // maxAttempts consecutive ports. Returns the bound listener and the port
 // that actually succeeded, or an error if all attempts failed. Each failed
 // attempt is logged with the real net.Listen error (not a speculative
 // "busy" message), so permission-denied and parse errors aren't masked
 // as port collisions.
 func bindWithFallback(port, maxAttempts int) (net.Listener, int, error) {
+	host := statusBindHost()
 	var lastErr error
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		tryPort := port + attempt
-		addr := fmt.Sprintf("localhost:%d", tryPort)
+		addr := fmt.Sprintf("%s:%d", host, tryPort)
 		listener, err := net.Listen("tcp", addr)
 		if err == nil {
 			return listener, tryPort, nil

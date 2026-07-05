@@ -11,6 +11,11 @@ services:
       # DISCORD_BOT_TOKEN + any secrets. Created on the host once.
       - /home/angrynrrd/go_trader/.env
 
+    environment:
+      # In Docker, "localhost" = container loopback only — Coolify's reverse
+      # proxy connects via the container IP, so bind all interfaces.
+      GO_TRADER_STATUS_BIND: "0.0.0.0"
+
     volumes:
       # Persistent config + state DB (out-of-tree #1056 layout)
       - /home/angrynrrd/go_trader:/var/lib/go-trader
