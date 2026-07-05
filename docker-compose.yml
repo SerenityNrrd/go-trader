@@ -23,9 +23,9 @@ services:
       - /home/angrynrrd/go_trader/logs:/app/logs
 
     ports:
-      # Status / UI server (in-app DefaultStatusPort=8099). Host-side collision?
-      # Change only the LEFT number (host:container).
-      - "8199:8099"
+      # Status / UI server (in-app DefaultStatusPort=8099).
+      # Coolify proxies the domain directly to this port.
+      - "8099:8099"
 
     # Coolify healthcheck hits /health (503 while draining)
     healthcheck:
