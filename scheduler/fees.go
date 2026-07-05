@@ -27,6 +27,9 @@ const (
 	OKXPerpsTakerFeePct = 0.0005 // 0.05% taker fee
 	OKXOptionFeePct     = 0.0003 // 0.03% of contract value
 
+	// Alpaca crypto taker fee (current retail tier)
+	AlpacaCryptoTakerFeePct = 0.0025 // 0.25% taker fee
+
 	// Slippage simulation (random +/- this pct)
 	SlippagePct = 0.0005 // 0.05% (5 basis points)
 )
@@ -61,6 +64,8 @@ func CalculatePlatformSpotFee(platform string, value float64) float64 {
 		return value * OKXSpotTakerFeePct
 	case "okx-perps":
 		return value * OKXPerpsTakerFeePct
+	case "alpaca":
+		return value * AlpacaCryptoTakerFeePct
 	default:
 		return CalculateSpotFee(value)
 	}
